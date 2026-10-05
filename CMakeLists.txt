@@ -75,7 +75,8 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/linux/notify/*.cpp
         src/linux/tray/*.cpp
         src/linux/power/*.cpp
-        src/linux/network/*.cpp)
+        src/linux/network/*.cpp
+        src/linux/bluetooth/*.cpp)
     # The no-PipeWire stub is chosen below, not by the src/linux/*.cpp glob
     # (otherwise both AudioService::create definitions land in the archive).
     list(REMOVE_ITEM _linux_sources ${CMAKE_CURRENT_SOURCE_DIR}/src/linux/audio_unavailable.cpp)

@@ -11,7 +11,8 @@
 
 add_library(brosys_system_fakes STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/linux/fakes/fake_logind.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/linux/fakes/fake_nm.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/linux/fakes/fake_nm.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/linux/fakes/fake_bluez.cpp)
 target_link_libraries(brosys_system_fakes PUBLIC brosys brosys_linux_testsupport)
 target_include_directories(brosys_system_fakes PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/src)
 brosys_warnings(brosys_system_fakes)
@@ -26,6 +27,7 @@ if(BROSYS_UMOCKDEV_FOUND)
 endif()
 brosys_test(test_power_system SOURCES linux/test_power_system.cpp LIBS ${_sys_libs})
 brosys_test(test_screensaver SOURCES linux/test_screensaver.cpp LIBS ${_sys_libs})
+brosys_test(test_bluetooth SOURCES linux/test_bluetooth.cpp LIBS ${_sys_libs})
 brosys_test(test_network_fake SOURCES linux/test_network_fake.cpp LIBS ${_sys_libs})
 brosys_test(test_network_system SOURCES linux/test_network_system.cpp LIBS ${_sys_libs})
 brosys_test(test_network_wifi SOURCES linux/test_network_wifi.cpp LIBS ${_sys_libs} TIMEOUT 300)
