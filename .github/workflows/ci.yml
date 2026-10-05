@@ -56,6 +56,17 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             $LINUX_BUILD_PACKAGES $LINUX_PIPEWIRE_PACKAGES $LINUX_ORACLE_PACKAGES
 
+      # test_audio_session reads the user's own PipeWire session, read-only. The
+      # runner account has a systemd user manager but no desktop login to start
+      # PipeWire, so start the same user units a login would. If they cannot
+      # start, the test skips and says so.
+      - name: Start the user's PipeWire session (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          systemctl --user start pipewire.socket pipewire.service wireplumber.service pipewire-pulse.socket \
+            || echo "::warning::could not start a user PipeWire session; test_audio_session will skip"
+          systemctl --user --no-pager status pipewire.service wireplumber.service | head -20 || true
+
       # SwitchAudioSource is test_mac_audio's oracle.
       - name: Install packages (macOS)
         if: runner.os == 'macOS'
@@ -144,6 +155,11 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends gcovr \
             $LINUX_BUILD_PACKAGES $LINUX_PIPEWIRE_PACKAGES $LINUX_ORACLE_PACKAGES
+
+      - name: Start the user's PipeWire session
+        run: |
+          systemctl --user start pipewire.socket pipewire.service wireplumber.service pipewire-pulse.socket \
+            || echo "::warning::could not start a user PipeWire session; test_audio_session will skip"
 
       - name: Configure (instrumented)
         run: |

@@ -31,7 +31,9 @@ if(BROSYS_COVERAGE AND _brosys_top_level)
     if(MSVC)
         message(FATAL_ERROR "BROSYS_COVERAGE requires GCC or Clang (gcov instrumentation); MSVC is unsupported.")
     endif()
-    add_compile_options(--coverage -O0 -g)
+    # Atomic counters: the services run their own threads, and racy increments leave gcov
+    # with negative branch counts that gcovr rejects.
+    add_compile_options(--coverage -fprofile-update=atomic -O0 -g)
     add_link_options(--coverage)
     message(STATUS "brosys: coverage instrumentation ON (-O0)")
 endif()

@@ -3,7 +3,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <cstdio>
 #include <thread>
+#include <vector>
 
 namespace bstest {
 
@@ -21,6 +23,22 @@ bool wait_path(const std::string& path, std::chrono::milliseconds timeout) {
 }
 
 std::string quote(const std::string& s) { return "\"" + s + "\""; }
+
+// WirePlumber 0.5 runs a named profile ("policy": the session policy, no hardware
+// monitors). 0.4 (Ubuntu 24.04, Debian 12) has no profiles and rejects the option; its
+// default configuration is the whole session manager, which on a private PipeWire with
+// only null nodes does the same job. `wireplumber --version` prints
+// "Linked with libwireplumber X.Y.Z".
+std::vector<std::string> wireplumber_argv(const Env& env) {
+    auto r = run({"wireplumber", "--version"}, env, std::chrono::milliseconds(5000));
+    const std::string key = "libwireplumber ";
+    size_t at = r.out.rfind(key);
+    int major = 0, minor = 0;
+    if (at != std::string::npos && std::sscanf(r.out.c_str() + at + key.size(), "%d.%d", &major, &minor) == 2 &&
+        major == 0 && minor < 5)
+        return {"wireplumber"};
+    return {"wireplumber", "--profile", "policy"};
+}
 
 std::string pipewire_conf(const std::vector<NullNode>& nodes) {
     std::string objects;
@@ -106,7 +124,7 @@ std::string PrivatePipeWire::launch() {
     const auto& nodes = nodes_;
     pipewire_ = Daemon({"pipewire", "-c", conf_}, env(), false);
     if (!wait_path(socket_, std::chrono::milliseconds(10000))) return "pipewire did not create " + socket_;
-    wireplumber_ = Daemon({"wireplumber", "--profile", "policy"}, env(), false);
+    wireplumber_ = Daemon(wireplumber_argv(env()), env(), false);
     // Ready once WirePlumber has chosen a default sink.
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(15000);
     while (true) {
