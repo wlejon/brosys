@@ -7,6 +7,7 @@
 #include "linux/support/private_bus.h"
 
 #include <atomic>
+#include <mutex>
 #include <unistd.h>
 
 using namespace brosys::dbus;
@@ -339,6 +340,92 @@ void test_disconnect() {
     CHECK(std::chrono::steady_clock::now() - t0 < 2s);
 }
 
+// The daemon restarts at the same address: the connection comes back by
+// itself with a new unique name, its exported object and match rules
+// installed again (busctl is the independent client); names are the
+// owner's to re-request, which the reconnect handler does here.
+void test_reconnect() {
+    bstest::PrivateBus bus;
+    REQUIRE(bus.ok());
+    std::string err;
+    // Opened with the guid dbus-daemon printed: it pins the first instance,
+    // so reconnecting must drop it.
+    REQUIRE(bus.address_with_guid().find(",guid=") != std::string::npos);
+    auto c = Connection::open(BusKind::Session, bus.address_with_guid(), "phoenix", &err);
+    REQUIRE(c);
+    Server s;
+    REQUIRE(c->export_interface(kPath, s.make(c.get()), &err));
+    CHECK(c->request_name(kService, 0, &err) == NameRequest::PrimaryOwner);
+    std::atomic<int> drops{0}, returns{0};
+    std::atomic<bool> handler_on_bus_thread{false};
+    c->set_disconnect_handler([&] { ++drops; });
+    c->set_reconnect_handler([&] {
+        handler_on_bus_thread = c->on_bus_thread();
+        std::string e;
+        c->request_name(kService, 0, &e);  // run_sync inline: we are on the bus thread
+        ++returns;
+    });
+    std::mutex mu;
+    std::vector<std::string> pings;
+    REQUIRE(c->add_match("type='signal',interface='org.brosys.Ping'", [&](const Message& m) {
+        std::lock_guard<std::mutex> lock(mu);
+        if (!m.args.empty()) pings.push_back(m.args[0].as_string());
+    }));
+
+    for (int round = 1; round <= 2; ++round) {
+        REQUIRE(bus.restart());
+        CHECK(bstest::wait_until([&] { return returns.load() == round; }, 10000ms));
+        CHECK_EQ(drops.load(), round);
+        CHECK(c->connected());
+        CHECK(handler_on_bus_thread.load());
+        // A new daemon numbers from :1.0 again, so the name may even repeat;
+        // what matters is that it is the one the new daemon gave us.
+        CHECK(!c->unique_name().empty());
+        CHECK_EQ(c->get_name_owner(kService), c->unique_name());
+        // The object answers again, under the re-requested name.
+        auto r = run({"busctl", "--address=" + bus.address(), "call", kService, kPath, kIface, "Add", "ii", "2",
+                      std::to_string(round)});
+        CHECK_EQ(r.exit_code, 0);
+        CHECK_EQ(trim(r.out), "i " + std::to_string(2 + round));
+        r = run({"busctl", "--address=" + bus.address(), "get-property", kService, kPath, kIface, "Name"});
+        CHECK_EQ(trim(r.out), std::string("s \"brosys\""));
+        // The match is back: a signal from another process reaches it.
+        r = run({"busctl", "--address=" + bus.address(), "emit", "/x", "org.brosys.Ping", "Hit", "s",
+                 "round-" + std::to_string(round)});
+        CHECK_EQ(r.exit_code, 0);
+        CHECK(bstest::wait_until([&] {
+            std::lock_guard<std::mutex> lock(mu);
+            return !pings.empty() && pings.back() == "round-" + std::to_string(round);
+        }, 5000ms));
+    }
+
+    // A match added and an object exported while the bus is down are
+    // installed when it comes back.
+    bus.kill();
+    CHECK(bstest::wait_until([&] { return drops.load() == 3; }, 5000ms));
+    CHECK(!c->connected());
+    Server late;
+    CHECK(c->export_interface("/org/brosys/Late", late.make(c.get()), &err));
+    std::atomic<bool> late_hit{false};
+    CHECK(c->add_match("type='signal',interface='org.brosys.Late'", [&](const Message&) { late_hit = true; }) != 0);
+    CHECK(!c->call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "ListNames").ok);
+    REQUIRE(bus.restart());
+    CHECK(bstest::wait_until([&] { return returns.load() == 3; }, 10000ms));
+    auto r = run({"busctl", "--address=" + bus.address(), "call", kService, "/org/brosys/Late", kIface, "Echo", "s",
+                  "late"});
+    CHECK_EQ(trim(r.out), std::string("s \"late\""));
+    run({"busctl", "--address=" + bus.address(), "emit", "/y", "org.brosys.Late", "Hit"});
+    CHECK(bstest::wait_until([&] { return late_hit.load(); }, 5000ms));
+
+    // With reconnection off, a drop is final.
+    c->set_auto_reconnect(false);
+    REQUIRE(bus.restart());
+    CHECK(bstest::wait_until([&] { return drops.load() == 4; }, 5000ms));
+    std::this_thread::sleep_for(500ms);
+    CHECK_EQ(returns.load(), 3);
+    CHECK(!c->connected());
+}
+
 void test_values() {
     Value v = Value::vardict({{"k", Value::u32(3)}, {"img", Value::structure({Value::i32(1), Value::bytes({1, 2})})}});
     CHECK_EQ(v.sig, std::string("a{sv}"));
@@ -364,5 +451,6 @@ int main() {
     test_signals_and_timers(bus);
     test_names(bus);
     test_disconnect();
+    test_reconnect();
     return bstest::finish("test_dbus_layer");
 }

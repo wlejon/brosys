@@ -25,7 +25,13 @@ FakeNM::FakeNM(const std::string& bus_address) {
 FakeNM::~FakeNM() { conn_.reset(); }
 
 bool FakeNM::own_name() {
-    return conn_->request_name("org.freedesktop.NetworkManager", 0, &error_) == NameRequest::PrimaryOwner;
+    if (conn_->request_name("org.freedesktop.NetworkManager", 0, &error_) != NameRequest::PrimaryOwner) return false;
+    // Survives the bus restarting (re-owns the name), as NetworkManager does.
+    conn_->set_reconnect_handler([this] {
+        std::string e;
+        conn_->request_name("org.freedesktop.NetworkManager", 0, &e);
+    });
+    return true;
 }
 
 Value FakeNM::managed_objects() const {

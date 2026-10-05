@@ -285,6 +285,19 @@ void run_test() {
     REQUIRE(nm->own_name());
     ev = log.wait<NetworkChanged>([](const NetworkChanged& c) { return c.state.devices.size() == 2; });
     CHECK(ev && ev->state.primary_device == kEth);
+
+    // ---- the system bus daemon restarts (same address): empty while it is
+    // down, then reloaded once NetworkManager (the fake, which reconnects and
+    // re-owns its name) is back on the new daemon.
+    REQUIRE(bus.restart());
+    ev = log.wait<NetworkChanged>([](const NetworkChanged& c) { return c.state.devices.empty(); });
+    CHECK(ev.has_value());
+    ev = log.wait<NetworkChanged>([](const NetworkChanged& c) { return c.state.devices.size() == 2; }, 15000ms);
+    CHECK(ev && ev->state.primary_device == kEth);
+    // Signals arrive on the new connection: an OS-initiated scan completes.
+    nm->set(kWifi, kWireless, {{"LastScan", Value::i64(1234567)}});
+    done = log.wait<WifiScanCompleted>(5000ms);
+    CHECK(done && done->ok);
 }
 
 }  // namespace

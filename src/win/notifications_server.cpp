@@ -85,6 +85,8 @@ public:
         }
         events_.push(NotificationServerStatus{caps_.receives_foreign, caps_.detail});
         timer_ = std::thread([this] { timer_loop(); });
+        // Balloons shown before this server existed (held by the hub).
+        if (hub_) hub_->deliver_held(this);
         return true;
     }
 

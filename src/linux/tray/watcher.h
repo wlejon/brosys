@@ -1,4 +1,6 @@
-// org.kde.StatusNotifierWatcher at /StatusNotifierWatcher.
+// The StatusNotifierWatcher at /StatusNotifierWatcher, as
+// org.kde.StatusNotifierWatcher and org.freedesktop.StatusNotifierWatcher:
+// one registry behind both interfaces, every signal emitted on both.
 //
 // Lives on the tray host's connection and runs entirely on its bus thread.
 // Items register as a bus name ("org.kde.StatusNotifierItem-1-1", path
@@ -17,13 +19,19 @@
 namespace brosys::tray {
 
 inline constexpr const char* kWatcherName = "org.kde.StatusNotifierWatcher";
+inline constexpr const char* kFdoWatcherName = "org.freedesktop.StatusNotifierWatcher";
 inline constexpr const char* kWatcherPath = "/StatusNotifierWatcher";
 inline constexpr const char* kWatcherIface = "org.kde.StatusNotifierWatcher";
+inline constexpr const char* kFdoWatcherIface = "org.freedesktop.StatusNotifierWatcher";
+
+// The interface an item registered through: its own item interface is
+// most likely the matching one (org.kde / org.freedesktop.StatusNotifierItem).
+enum class ItemFlavor { Kde, Freedesktop };
 
 class Watcher {
 public:
     struct Callbacks {
-        std::function<void(const std::string& id)> item_registered;
+        std::function<void(const std::string& id, ItemFlavor flavor)> item_registered;
         std::function<void(const std::string& id)> item_unregistered;
     };
 
@@ -37,13 +45,17 @@ public:
     bool start(std::string* error);
     // An in-process host (registered without a D-Bus round trip).
     void add_host(const std::string& bus_name);
+    // The bus went away: every registration is void (no signals, no callbacks).
+    void reset();
     const std::vector<std::string>& items() const { return items_; }
 
 private:
-    dbus::MethodResult register_item(const dbus::MethodCall& c);
+    dbus::MethodResult register_item(const dbus::MethodCall& c, ItemFlavor flavor);
     dbus::MethodResult register_host(const dbus::MethodCall& c);
     void owner_changed(const std::string& name, const std::string& new_owner);
     void remove_item_at(size_t index);
+    void emit(const char* member, const dbus::Args& args);
+    void emit_changed(const char* property);
 
     dbus::Connection* conn_;
     Callbacks cb_;

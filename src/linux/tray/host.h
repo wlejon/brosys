@@ -25,6 +25,7 @@
 namespace brosys::tray {
 
 inline constexpr const char* kItemIface = "org.kde.StatusNotifierItem";
+inline constexpr const char* kFdoItemIface = "org.freedesktop.StatusNotifierItem";
 inline constexpr const char* kMenuIface = "com.canonical.dbusmenu";
 
 class LinuxTrayHost final : public TrayHost {
@@ -41,10 +42,14 @@ public:
     Result secondary_activate(const std::string& item_id, int32_t x, int32_t y) override;
     Result context_menu(const std::string& item_id, int32_t x, int32_t y) override;
     Result scroll(const std::string& item_id, int32_t delta, ScrollOrientation orientation) override;
+    Result double_click(const std::string& item_id, int32_t x, int32_t y) override;
+    Result keyboard_select(const std::string& item_id, int32_t x, int32_t y) override;
+    Result hover(const std::string& item_id, int32_t x, int32_t y, HoverPhase phase) override;
 
     std::optional<MenuItem> menu(const std::string& item_id) const override;
     Result menu_about_to_show(const std::string& item_id, int32_t menu_item_id) override;
-    Result menu_event(const std::string& item_id, int32_t menu_item_id, MenuEventType type) override;
+    Result menu_event(const std::string& item_id, int32_t menu_item_id, MenuEventType type,
+                      const MenuEventData& data) override;
     Result set_item_rect(const std::string& item_id, const Rect32& rect) override;
 
 private:
@@ -53,6 +58,7 @@ private:
         std::string service;     // as registered (unique or well-known name)
         std::string path;
         std::string owner;       // unique name (signal matches)
+        const char* iface = kItemIface;  // the item interface being tried / found
         uint32_t pid = 0;
         ItemSnapshot snap;
         bool announced = false;  // TrayItemAdded was pushed
@@ -68,19 +74,24 @@ private:
 
     // ---- roles (host.cpp, bus thread)
     bool claim_host_name(std::string* error);
+    bool enter_role(std::string* error);
     bool become_watcher(std::string* error);
     void enter_client(const std::string& owner);
     void watcher_owner_changed(const std::string& new_owner);
     void on_watcher_signal(const dbus::Message& m);
+    void on_disconnected();
+    void on_reconnected();
     void set_status(TrayRole role, std::string detail);
 
     // ---- items and menus (items.cpp, bus thread)
-    void item_appeared(const std::string& id);
-    void item_vanished(const std::string& id);
-    void clear_items();
+    void item_appeared(const std::string& id, ItemFlavor flavor = ItemFlavor::Kde);
+    // `why`: reported as TrayItemDropped when the item was never announced.
+    void item_vanished(const std::string& id, const std::string& why = "it was unregistered before it answered");
+    void clear_items(const std::string& why);
     ItemState* find_item(const std::string& id, uint64_t epoch);
     void fetch_item(const std::string& id);
-    void apply_item(const std::string& id, uint64_t epoch, bool ok, const std::map<std::string, dbus::Value>& props);
+    void apply_item(const std::string& id, uint64_t epoch, bool ok, const std::map<std::string, dbus::Value>& props,
+                    const std::string& error);
     void set_menu_path(const std::string& id, const std::string& path);
     void fetch_menu(const std::string& id);
     void store_menu(const std::string& id, uint64_t epoch, const std::string& menu_path, const dbus::Reply& r);
@@ -88,6 +99,7 @@ private:
     // ---- host-thread helpers (items.cpp)
     struct Target {
         std::string service, path, menu_path;
+        const char* iface = kItemIface;
         uint64_t epoch = 0;
     };
     bool locate(const std::string& id, Target* t, std::string* why) const;

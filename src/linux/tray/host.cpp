@@ -26,12 +26,8 @@ LinuxTrayHost::~LinuxTrayHost() {
 bool LinuxTrayHost::start(std::string* error) {
     conn_ = dbus::Connection::open(dbus::BusKind::Session, cfg_.session_bus_address, "brosys-tray", error);
     if (!conn_) return false;
-    conn_->set_disconnect_handler([this] {
-        if (stopping_) return;
-        clear_items();
-        watcher_owner_.clear();
-        set_status(TrayRole::None, "the session bus connection was lost");
-    });
+    conn_->set_disconnect_handler([this] { on_disconnected(); });
+    conn_->set_reconnect_handler([this] { on_reconnected(); });
     return conn_->run_sync([&]() -> bool {
         if (!claim_host_name(error)) return false;
         if (!conn_->add_match(std::string("type='signal',path='") + kWatcherPath + "',interface='" + kWatcherIface + "'",
@@ -41,36 +37,65 @@ bool LinuxTrayHost::start(std::string* error) {
             if (error) *error = "cannot subscribe to the StatusNotifierWatcher signals";
             return false;
         }
-        if (cfg_.become_watcher) {
-            std::string err;
-            switch (conn_->request_name(kWatcherName, dbus::name_flags::Queue, &err)) {
-                case dbus::NameRequest::PrimaryOwner:
-                case dbus::NameRequest::AlreadyOwner:
-                    return become_watcher(error);
-                case dbus::NameRequest::InQueue:
-                case dbus::NameRequest::Exists: {
-                    std::string owner = conn_->get_name_owner(kWatcherName);
-                    if (owner.empty())
-                        set_status(TrayRole::None, "queued for org.kde.StatusNotifierWatcher");
-                    else
-                        enter_client(owner);
-                    return true;
-                }
-                case dbus::NameRequest::Error: break;
-            }
-            if (error) *error = std::string("RequestName ") + kWatcherName + ": " + err;
-            return false;
-        }
-        std::string owner = conn_->get_name_owner(kWatcherName);
-        if (owner.empty())
-            set_status(TrayRole::None, "no StatusNotifierWatcher on the bus (become_watcher is off); waiting for one");
-        else
-            enter_client(owner);
-        return true;
+        return enter_role(error);
     });
 }
 
+// The bus daemon went away: every item and registration with it.
+void LinuxTrayHost::on_disconnected() {
+    if (stopping_) return;
+    clear_items("the session bus connection was lost");
+    watcher_owner_.clear();
+    if (watcher_) watcher_->reset();
+    set_status(TrayRole::None, "the session bus connection was lost; reconnecting");
+}
+
+// The bus daemon is back (a new one at the same address): our matches and
+// the watcher object are installed again by the connection; names and the
+// role are ours to take up again. Items re-register by themselves when the
+// watcher name gets an owner.
+void LinuxTrayHost::on_reconnected() {
+    if (stopping_) return;
+    std::string err;
+    if (!claim_host_name(&err) || !enter_role(&err)) set_status(TrayRole::None, "reconnected, but " + err);
+}
+
+// Watcher (owning the name, or queued for it) or WatcherClient (bus thread).
+bool LinuxTrayHost::enter_role(std::string* error) {
+    if (cfg_.become_watcher) {
+        std::string err;
+        switch (conn_->request_name(kWatcherName, dbus::name_flags::Queue, &err)) {
+            case dbus::NameRequest::PrimaryOwner:
+            case dbus::NameRequest::AlreadyOwner:
+                return become_watcher(error);
+            case dbus::NameRequest::InQueue:
+            case dbus::NameRequest::Exists: {
+                std::string owner = conn_->get_name_owner(kWatcherName);
+                if (owner.empty())
+                    set_status(TrayRole::None, "queued for org.kde.StatusNotifierWatcher");
+                else
+                    enter_client(owner);
+                return true;
+            }
+            case dbus::NameRequest::Error: break;
+        }
+        if (error) *error = std::string("RequestName ") + kWatcherName + ": " + err;
+        return false;
+    }
+    std::string owner = conn_->get_name_owner(kWatcherName);
+    if (owner.empty())
+        set_status(TrayRole::None, "no StatusNotifierWatcher on the bus (become_watcher is off); waiting for one");
+    else
+        enter_client(owner);
+    return true;
+}
+
 bool LinuxTrayHost::claim_host_name(std::string* error) {
+    if (!host_name_.empty()) {  // reconnected: the name we had, if it is free
+        std::string err;
+        auto r = conn_->request_name(host_name_, 0, &err);
+        if (r == dbus::NameRequest::PrimaryOwner || r == dbus::NameRequest::AlreadyOwner) return true;
+    }
     for (int attempt = 0; attempt < 64; ++attempt) {
         int n = g_instances++;
         host_name_ = "org.kde.StatusNotifierHost-" + std::to_string(getpid());
@@ -102,8 +127,8 @@ void LinuxTrayHost::set_status(TrayRole role, std::string detail) {
 bool LinuxTrayHost::become_watcher(std::string* error) {
     if (!watcher_) {
         Watcher::Callbacks cb;
-        cb.item_registered = [this](const std::string& id) { item_appeared(id); };
-        cb.item_unregistered = [this](const std::string& id) { item_vanished(id); };
+        cb.item_registered = [this](const std::string& id, ItemFlavor flavor) { item_appeared(id, flavor); };
+        cb.item_unregistered = [this](const std::string& id) { item_vanished(id, "it was unregistered before it answered"); };
         auto w = std::make_unique<Watcher>(conn_.get(), std::move(cb));
         std::string err;
         if (!w->start(&err)) {
@@ -115,7 +140,20 @@ bool LinuxTrayHost::become_watcher(std::string* error) {
     }
     watcher_owner_ = conn_->unique_name();
     watcher_->add_host(host_name_);
-    set_status(TrayRole::Watcher, std::string("owns ") + kWatcherName + " (host " + host_name_ + ")");
+    // The same registry under the freedesktop name, when nobody else serves it
+    // (queued otherwise: it becomes ours if its owner leaves).
+    std::string err, also;
+    switch (conn_->request_name(kFdoWatcherName, dbus::name_flags::Queue, &err)) {
+        case dbus::NameRequest::PrimaryOwner:
+        case dbus::NameRequest::AlreadyOwner: also = std::string(" and ") + kFdoWatcherName; break;
+        case dbus::NameRequest::InQueue:
+        case dbus::NameRequest::Exists:
+            also = std::string(" (queued for ") + kFdoWatcherName + ", owned by " +
+                   conn_->get_name_owner(kFdoWatcherName) + ")";
+            break;
+        case dbus::NameRequest::Error: also = std::string(" (") + kFdoWatcherName + ": " + err + ")"; break;
+    }
+    set_status(TrayRole::Watcher, std::string("owns ") + kWatcherName + also + " (host " + host_name_ + ")");
     return true;
 }
 
@@ -140,7 +178,7 @@ void LinuxTrayHost::watcher_owner_changed(const std::string& now) {
     if (stopping_ || now == watcher_owner_) return;
     // A different watcher knows nothing of the old one's items; they
     // re-register with the new watcher themselves.
-    clear_items();
+    clear_items("the StatusNotifierWatcher it registered with went away");
     watcher_owner_.clear();
     if (now.empty()) {
         set_status(TrayRole::None, cfg_.become_watcher

@@ -424,6 +424,56 @@ void test_names() {
     CHECK(!survivor->capabilities().receives_foreign);
 }
 
+// The session bus daemon restarts (same address, every connection dropped,
+// every name released) under a server that owns the name and a second one
+// queued behind it: both report the loss, reconnect, ask again, and exactly
+// one ends up owning the name; notify-send on the new daemon reaches it.
+void test_bus_restart() {
+    bstest::PrivateBus bus;
+    REQUIRE(bus.ok());
+    NotificationServerConfig cfg;
+    auto a = make_server(bus, cfg);
+    REQUIRE(a);
+    Log la(a->events());
+    CHECK(la.wait<NotificationServerStatus>([](const NotificationServerStatus& s) { return s.active; }).has_value());
+    auto b = make_server(bus, cfg);
+    REQUIRE(b);
+    Log lb(b->events());
+    CHECK(lb.wait<NotificationServerStatus>([](const NotificationServerStatus& s) { return !s.active; }).has_value());
+    auto r = run({"notify-send", "-p", "-t", "0", "before"}, bus.env());
+    CHECK_EQ(r.exit_code, 0);
+    CHECK(la.wait<NotificationPosted>([](const NotificationPosted& e) { return e.notification.summary == "before"; }));
+
+    for (int round = 0; round < 2; ++round) {
+        REQUIRE(bus.restart());
+        auto lost = [](const NotificationServerStatus& s) { return !s.active && s.detail.find("lost") != std::string::npos; };
+        // The owner reports the loss; the queued one was inactive already.
+        CHECK(la.seen<NotificationServerStatus>(lost, 5000ms) || lb.seen<NotificationServerStatus>(lost, 0ms));
+        CHECK(bstest::wait_until([&] {
+            return a->capabilities().receives_foreign != b->capabilities().receives_foreign;
+        }, 10000ms));
+        std::this_thread::sleep_for(200ms);  // a second owner would show up now
+        CHECK(a->capabilities().receives_foreign != b->capabilities().receives_foreign);
+        NotificationServer& owner = a->capabilities().receives_foreign ? *a : *b;
+        Log& lo = a->capabilities().receives_foreign ? la : lb;
+        std::string summary = "after-" + std::to_string(round);
+        r = run({"notify-send", "-p", summary}, bus.env());
+        CHECK_EQ(r.exit_code, 0);
+        auto p = lo.wait<NotificationPosted>([&](const NotificationPosted& e) { return e.notification.summary == summary; });
+        REQUIRE(p.has_value());
+        // CloseNotification over the new daemon closes it and signals.
+        r = gdbus_call(bus, "CloseNotification", {std::to_string(p->notification.id)});
+        CHECK_EQ(r.exit_code, 0);
+        CHECK(lo.wait<NotificationClosed>([&](const NotificationClosed& c) { return c.id == p->notification.id; }));
+        CHECK(owner.capabilities().receives_foreign);
+        la.clear();
+        lb.clear();
+    }
+    // Shown before the restarts, never expiring: still listed.
+    auto act = a->active();
+    CHECK(std::any_of(act.begin(), act.end(), [](const Notification& n) { return n.summary == "before"; }));
+}
+
 }  // namespace
 
 int main() {
@@ -447,5 +497,6 @@ int main() {
     with_bus(test_gdbus);
     with_bus(test_post);
     test_names();
+    test_bus_restart();
     return bstest::finish("test_notify_server");
 }

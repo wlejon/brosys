@@ -1,14 +1,21 @@
 // A real StatusNotifierItem client process for the tray tests: exports
-// org.kde.StatusNotifierItem plus a com.canonical.dbusmenu menu, registers
-// with whichever process owns org.kde.StatusNotifierWatcher (again whenever
-// that owner changes, as real items do), changes itself on command through
-// org.brosys.TestItem at /control, and prints every interaction it receives:
+// org.kde.StatusNotifierItem (or, with --flavor freedesktop,
+// org.freedesktop.StatusNotifierItem, registering with
+// org.freedesktop.StatusNotifierWatcher) plus a com.canonical.dbusmenu
+// menu, registers with whichever process owns the watcher name (again
+// whenever that owner changes, and after the bus daemon restarts, as real
+// items do), changes itself on command through org.brosys.TestItem at
+// /control, and prints every interaction it receives:
 //
 //   READY <unique name> <item id>      REGISTERED <watcher> | REGISTER-FAILED <error>
 //   ACTIVATE x y   SECONDARY x y   CONTEXT x y   SCROLL delta orientation
-//   EVENT id type  ABOUTTOSHOW id
+//   EVENT id type <sig>:<data> <timestamp>   ABOUTTOSHOW id   RECONNECTED <unique name> <item id>
 //
-// usage: brosys_sni_item --bus ADDRESS [--mode path|name] [--id ID] [--title TITLE]
+// --broken registers without exporting the item object (it never answers);
+// --watcher picks the watcher flavour independently of --flavor (after it).
+//
+// usage: brosys_sni_item --bus ADDRESS [--mode path|name] [--flavor kde|freedesktop]
+//                        [--watcher kde|freedesktop] [--broken 1] [--id ID] [--title TITLE]
 #include "linux/dbus/connection.h"
 
 #include <condition_variable>
@@ -22,10 +29,10 @@ using namespace brosys::dbus;
 
 namespace {
 
-constexpr const char* kItemIface = "org.kde.StatusNotifierItem";
+const char* kItemIface = "org.kde.StatusNotifierItem";
 constexpr const char* kMenuIface = "com.canonical.dbusmenu";
 constexpr const char* kMenuPath = "/MenuBar";
-constexpr const char* kWatcher = "org.kde.StatusNotifierWatcher";
+const char* kWatcher = "org.kde.StatusNotifierWatcher";  // the bus name and the interface
 
 void say(const std::string& line) {
     std::printf("%s\n", line.c_str());
@@ -175,7 +182,13 @@ std::shared_ptr<Interface> Item::menu_interface() {
                               return MethodResult::error(kErrorInvalidArgs, "no such property");
                           }});
     i->methods.push_back({"Event", "isvu", "", {"id", "eventId", "data", "timestamp"}, {}, [](const MethodCall& c) {
-                              say("EVENT " + std::to_string(c.args[0].as_int()) + " " + c.args[1].as_string());
+                              Value d = c.args[2].unwrap();
+                              std::string data = d.sig + ":";
+                              if (d.sig == "s") data += d.as_string();
+                              else if (d.sig == "b") data += d.as_bool() ? "true" : "false";
+                              else data += std::to_string(d.as_int());
+                              say("EVENT " + std::to_string(c.args[0].as_int()) + " " + c.args[1].as_string() + " " +
+                                  data + " " + std::to_string(c.args[3].as_uint()));
                               return MethodResult::ok();
                           }});
     i->methods.push_back({"EventGroup", "a(isvu)", "ai", {}, {}, [](const MethodCall& c) {
@@ -270,6 +283,7 @@ std::shared_ptr<Interface> Item::control_interface() {
 
 int main(int argc, char** argv) {
     std::string address, mode = "path";
+    bool broken = false;
     Item item;
     for (int i = 1; i + 1 < argc; i += 2) {
         std::string k = argv[i], v = argv[i + 1];
@@ -277,6 +291,13 @@ int main(int argc, char** argv) {
         else if (k == "--mode") mode = v;
         else if (k == "--id") item.id = v;
         else if (k == "--title") item.title = v;
+        else if (k == "--broken") broken = v == "1";
+        else if (k == "--flavor" && v == "freedesktop") {
+            kItemIface = "org.freedesktop.StatusNotifierItem";
+            kWatcher = "org.freedesktop.StatusNotifierWatcher";
+        } else if (k == "--watcher") {  // register through this watcher flavour, whatever the item's own
+            kWatcher = v == "freedesktop" ? "org.freedesktop.StatusNotifierWatcher" : "org.kde.StatusNotifierWatcher";
+        }
     }
     std::string err;
     auto conn = Connection::open(BusKind::Session, address, "sni-item", &err);
@@ -301,7 +322,7 @@ int main(int argc, char** argv) {
         item.register_arg = item.item_path;  // resolved against our unique name by the watcher
         item_id = conn->unique_name() + item.item_path;
     }
-    if (!conn->export_interface(item.item_path, item.item_interface(), &err) ||
+    if ((!broken && !conn->export_interface(item.item_path, item.item_interface(), &err)) ||
         !conn->export_interface(kMenuPath, item.menu_interface(), &err) ||
         !conn->export_interface("/control", item.control_interface(), &err)) {
         std::fprintf(stderr, "sni_item: export: %s\n", err.c_str());
@@ -309,6 +330,16 @@ int main(int argc, char** argv) {
     }
     conn->watch_name_owner(kWatcher, [&](const std::string&, const std::string&, const std::string& now) {
         if (!now.empty()) item.register_with(now);
+    });
+    // The bus daemon restarted: objects and matches are back by themselves;
+    // the item's own name and its registration are its business.
+    conn->set_reconnect_handler([&] {
+        std::string e;
+        std::string id = item.register_arg[0] == '/' ? conn->unique_name() + item.item_path : item_id;
+        if (mode == "name") conn->request_name(item.register_arg, 0, &e);
+        say("RECONNECTED " + conn->unique_name() + " " + id);
+        std::string owner = conn->get_name_owner(kWatcher);
+        if (!owner.empty()) item.register_with(owner);
     });
     say("READY " + conn->unique_name() + " " + item_id);
     std::string owner = conn->get_name_owner(kWatcher);

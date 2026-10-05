@@ -60,6 +60,7 @@ private:
     bool remove(uint32_t id, CloseReason reason);
     void on_expired(uint32_t id, uint64_t generation);
     void set_owned(bool owned, std::string detail, bool force);
+    bool claim(bool force, std::string* error);
     uint32_t allocate_id();
 
     NotificationServerConfig cfg_;
@@ -107,7 +108,14 @@ bool LinuxNotificationServer::start(std::string* error) {
     if (!conn_) return false;
     if (!conn_->export_interface(kPath, make_interface(), error)) return false;
     conn_->set_disconnect_handler([this] {
-        if (!stopping_) set_owned(false, "the session bus connection was lost", false);
+        if (!stopping_) set_owned(false, "the session bus connection was lost; reconnecting", false);
+    });
+    // The bus daemon restarted: our object is exported again by the
+    // connection; the name is ours to ask for again.
+    conn_->set_reconnect_handler([this] {
+        if (stopping_) return;
+        std::string err;
+        if (!claim(false, &err)) set_owned(false, "reconnected, but " + err, true);
     });
     conn_->set_name_handler([this](const std::string& name, bool acquired) {
         if (name != kBusName || stopping_) return;
@@ -121,28 +129,32 @@ bool LinuxNotificationServer::start(std::string* error) {
     });
     // Request and report on the bus thread, so NameAcquired / NameLost are
     // only ever seen after the initial status.
-    return conn_->run_sync([&]() -> bool {
-        uint32_t flags = dbus::name_flags::AllowReplacement | dbus::name_flags::Queue;
-        if (cfg_.replace_existing) flags |= dbus::name_flags::ReplaceExisting;
-        std::string err;
-        switch (conn_->request_name(kBusName, flags, &err)) {
-            case dbus::NameRequest::PrimaryOwner:
-            case dbus::NameRequest::AlreadyOwner:
-                set_owned(true, std::string("owns ") + kBusName, true);
-                return true;
-            case dbus::NameRequest::InQueue:
-            case dbus::NameRequest::Exists: {
-                std::string owner = conn_->get_name_owner(kBusName);
-                set_owned(false, std::string("queued for ") + kBusName + (owner.empty() ? "" : " behind " + owner) +
-                                     (cfg_.replace_existing ? " (the owner does not allow replacement)" : ""),
-                          true);
-                return true;
-            }
-            case dbus::NameRequest::Error: break;
+    return conn_->run_sync([&]() -> bool { return claim(true, error); });
+}
+
+// Bus thread: RequestName and report the outcome (`force`: report even an
+// unchanged ownership, for the initial status).
+bool LinuxNotificationServer::claim(bool force, std::string* error) {
+    uint32_t flags = dbus::name_flags::AllowReplacement | dbus::name_flags::Queue;
+    if (cfg_.replace_existing) flags |= dbus::name_flags::ReplaceExisting;
+    std::string err;
+    switch (conn_->request_name(kBusName, flags, &err)) {
+        case dbus::NameRequest::PrimaryOwner:
+        case dbus::NameRequest::AlreadyOwner:
+            set_owned(true, std::string("owns ") + kBusName, force);
+            return true;
+        case dbus::NameRequest::InQueue:
+        case dbus::NameRequest::Exists: {
+            std::string owner = conn_->get_name_owner(kBusName);
+            set_owned(false, std::string("queued for ") + kBusName + (owner.empty() ? "" : " behind " + owner) +
+                                 (cfg_.replace_existing ? " (the owner does not allow replacement)" : ""),
+                      true);
+            return true;
         }
-        if (error) *error = std::string("RequestName ") + kBusName + ": " + err;
-        return false;
-    });
+        case dbus::NameRequest::Error: break;
+    }
+    if (error) *error = std::string("RequestName ") + kBusName + ": " + err;
+    return false;
 }
 
 void LinuxNotificationServer::set_owned(bool owned, std::string detail, bool force) {

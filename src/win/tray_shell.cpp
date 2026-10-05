@@ -105,21 +105,42 @@ public:
         return out;
     }
 
+    // What Explorer sends. Version 3+ icons get the NIN_* / WM_CONTEXTMENU
+    // notifications after the mouse messages; NIN_POPUP* are version 4 only.
     Result activate(const std::string& id, int32_t x, int32_t y) override {
-        return interact(id, x, y, WM_LBUTTONDOWN, WM_LBUTTONUP, NIN_SELECT);
+        return interact(id, x, y, {{WM_LBUTTONDOWN}, {WM_LBUTTONUP}, {NIN_SELECT, 3}});
     }
     Result secondary_activate(const std::string& id, int32_t x, int32_t y) override {
-        return interact(id, x, y, WM_MBUTTONDOWN, WM_MBUTTONUP, 0);
+        return interact(id, x, y, {{WM_MBUTTONDOWN}, {WM_MBUTTONUP}});
     }
     Result context_menu(const std::string& id, int32_t x, int32_t y) override {
-        return interact(id, x, y, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_CONTEXTMENU);
+        return interact(id, x, y, {{WM_RBUTTONDOWN}, {WM_RBUTTONUP}, {WM_CONTEXTMENU, 3}});
+    }
+    Result double_click(const std::string& id, int32_t x, int32_t y) override {
+        return interact(id, x, y,
+                        {{WM_LBUTTONDOWN}, {WM_LBUTTONUP}, {NIN_SELECT, 3}, {WM_LBUTTONDBLCLK}, {WM_LBUTTONUP}});
+    }
+    Result keyboard_select(const std::string& id, int32_t x, int32_t y) override {
+        // Shell_NotifyIcon: "the version 5.0 Shell sends ... NIN_KEYSELECT.
+        // Earlier versions send WM_RBUTTONDOWN and WM_RBUTTONUP messages."
+        return interact(id, x, y, {{NIN_KEYSELECT, 3}, {WM_RBUTTONDOWN, 0, 2}, {WM_RBUTTONUP, 0, 2}});
+    }
+    Result hover(const std::string& id, int32_t x, int32_t y, HoverPhase phase) override {
+        switch (phase) {
+            case HoverPhase::Enter: return interact(id, x, y, {{WM_MOUSEMOVE}, {NIN_POPUPOPEN, 4}}, false);
+            case HoverPhase::Move: return interact(id, x, y, {{WM_MOUSEMOVE}}, false);
+            case HoverPhase::Leave: return interact(id, x, y, {{NIN_POPUPCLOSE, 4}}, false);
+        }
+        return Result::failure("unknown hover phase");
     }
     Result scroll(const std::string&, int32_t, ScrollOrientation) override {
         return Result::failure("Windows tray icons have no scroll interaction in the Shell_NotifyIcon protocol");
     }
     std::optional<MenuItem> menu(const std::string&) const override { return std::nullopt; }
     Result menu_about_to_show(const std::string&, int32_t) override { return own_menus(); }
-    Result menu_event(const std::string&, int32_t, MenuEventType) override { return own_menus(); }
+    Result menu_event(const std::string&, int32_t, MenuEventType, const MenuEventData&) override {
+        return own_menus();
+    }
 
     Result set_item_rect(const std::string& id, const Rect32& rect) override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -406,7 +427,15 @@ private:
         }
     }
 
-    Result interact(const std::string& id, int32_t x, int32_t y, UINT down, UINT up, UINT v3_event) {
+    // One callback message, posted when the icon's version is in [min, max].
+    struct Step {
+        UINT message;
+        UINT min_version = 0;
+        UINT max_version = NOTIFYICON_VERSION_4;
+    };
+
+    Result interact(const std::string& id, int32_t x, int32_t y, std::initializer_list<Step> steps,
+                    bool foreground = true) {
         std::optional<CallbackTarget> t = target_of(id);
         if (!t) return Result::failure("no tray item '" + id + "'");
         if (!IsWindow(t->hwnd)) {
@@ -415,10 +444,11 @@ private:
         }
         if (!t->message) return Result::failure("tray item '" + id + "' has no callback message (NIF_MESSAGE)");
         // Let the icon's process take the foreground for its own menu / window.
-        AllowSetForegroundWindow(t->pid);
-        bool ok = post_callback(*t, down, x, y) && post_callback(*t, up, x, y);
-        if (ok && v3_event && t->version >= NOTIFYICON_VERSION) ok = post_callback(*t, v3_event, x, y);
-        if (!ok) return Result::failure(win32_error("PostMessage", GetLastError()));
+        if (foreground) AllowSetForegroundWindow(t->pid);
+        for (const Step& s : steps) {
+            if (t->version < s.min_version || t->version > s.max_version) continue;
+            if (!post_callback(*t, s.message, x, y)) return Result::failure(win32_error("PostMessage", GetLastError()));
+        }
         return Result::success();
     }
 

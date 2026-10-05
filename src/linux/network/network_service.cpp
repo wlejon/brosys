@@ -36,6 +36,15 @@ public:
             if (error) *error = "NetworkManager is not running (org.freedesktop.NetworkManager has no owner)";
             return false;
         }
+        // The system bus restarting: empty while it is down (every call
+        // fails), reloaded once the connection is back. NetworkManager
+        // restarting on its own is the NameOwnerChanged watch.
+        auto resync = [this] {
+            reload();
+            publish();
+        };
+        conn_->set_disconnect_handler(resync);
+        conn_->set_reconnect_handler(resync);
         return true;
     }
 

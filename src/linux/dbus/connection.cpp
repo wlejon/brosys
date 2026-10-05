@@ -2,6 +2,7 @@
 
 #include <systemd/sd-bus.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <ctime>
@@ -84,16 +85,86 @@ int node_trampoline(sd_bus_message* m, void* userdata, sd_bus_error*) {
 
 struct Connection::Match {
     Connection* conn = nullptr;
-    sd_bus_slot* slot = nullptr;
+    sd_bus_slot* slot = nullptr;  // null while disconnected
+    std::string rule;
     SignalHandler handler;
 };
 
 namespace {
+
 int match_trampoline(sd_bus_message* m, void* userdata, sd_bus_error*) {
     auto* match = static_cast<Connection::Match*>(userdata);
     match->conn->handle_match(*match, m);
     return 0;  // let other matches see it too
 }
+
+// The daemon's own signals: NameAcquired / NameLost are unicast to us.
+constexpr const char* kDaemonSignals =
+    "type='signal',sender='org.freedesktop.DBus',path='/org/freedesktop/DBus',interface='org.freedesktop.DBus'";
+
+// The address without its "guid=" keys. A guid pins the daemon instance (sd-bus
+// refuses a server with another one), and a restarted daemon is a new instance.
+std::string without_guid(const std::string& address) {
+    std::string out;
+    size_t start = 0;
+    while (start <= address.size()) {
+        size_t end = address.find(';', start);
+        if (end == std::string::npos) end = address.size();
+        std::string entry = address.substr(start, end - start);
+        size_t colon = entry.find(':');
+        if (colon != std::string::npos) {
+            std::string kept = entry.substr(0, colon + 1);
+            bool first = true;
+            size_t p = colon + 1;
+            while (p <= entry.size()) {
+                size_t comma = entry.find(',', p);
+                if (comma == std::string::npos) comma = entry.size();
+                std::string kv = entry.substr(p, comma - p);
+                if (!kv.empty() && kv.rfind("guid=", 0) != 0) {
+                    if (!first) kept += ',';
+                    kept += kv;
+                    first = false;
+                }
+                p = comma + 1;
+            }
+            entry = kept;
+        }
+        if (!out.empty() && !entry.empty()) out += ';';
+        out += entry;
+        start = end + 1;
+    }
+    return out;
+}
+
+constexpr std::chrono::milliseconds kFirstRetry(50);
+constexpr std::chrono::milliseconds kMaxRetry(2000);
+
+sd_bus* open_bus(BusKind kind, const std::string& address, const std::string& description, std::string* error) {
+    sd_bus* bus = nullptr;
+    int r;
+    if (address.empty()) {
+        r = kind == BusKind::System ? sd_bus_open_system_with_description(&bus, description.c_str())
+                                    : sd_bus_open_user_with_description(&bus, description.c_str());
+        if (r < 0) {
+            if (error) *error = errno_text(kind == BusKind::System ? "open system bus" : "open session bus", r);
+            return nullptr;
+        }
+        return bus;
+    }
+    r = sd_bus_new(&bus);
+    if (r >= 0) r = sd_bus_set_address(bus, address.c_str());
+    if (r >= 0) r = sd_bus_set_bus_client(bus, 1);
+    if (r >= 0) r = sd_bus_negotiate_fds(bus, 1);
+    if (r >= 0) r = sd_bus_set_description(bus, description.c_str());
+    if (r >= 0) r = sd_bus_start(bus);
+    if (r < 0) {
+        if (error) *error = errno_text(("connect to " + address).c_str(), r);
+        sd_bus_unref(bus);
+        return nullptr;
+    }
+    return bus;
+}
+
 }  // namespace
 
 std::string Reply::error() const {
@@ -107,31 +178,13 @@ std::string Reply::error() const {
 std::unique_ptr<Connection> Connection::open(BusKind kind, const std::string& address,
                                              const std::string& description, std::string* error) {
     std::unique_ptr<Connection> c(new Connection());
-    sd_bus* bus = nullptr;
-    int r;
-    if (address.empty()) {
-        r = kind == BusKind::System ? sd_bus_open_system_with_description(&bus, description.c_str())
-                                    : sd_bus_open_user_with_description(&bus, description.c_str());
-        if (r < 0) {
-            if (error) *error = errno_text(kind == BusKind::System ? "open system bus" : "open session bus", r);
-            return nullptr;
-        }
-    } else {
-        r = sd_bus_new(&bus);
-        if (r >= 0) r = sd_bus_set_address(bus, address.c_str());
-        if (r >= 0) r = sd_bus_set_bus_client(bus, 1);
-        if (r >= 0) r = sd_bus_negotiate_fds(bus, 1);
-        if (r >= 0) r = sd_bus_set_description(bus, description.c_str());
-        if (r >= 0) r = sd_bus_start(bus);
-        if (r < 0) {
-            if (error) *error = errno_text(("connect to " + address).c_str(), r);
-            sd_bus_unref(bus);
-            return nullptr;
-        }
-    }
+    c->kind_ = kind;
+    c->address_ = address;
+    c->description_ = description;
+    sd_bus* bus = open_bus(kind, address, description, error);
+    if (!bus) return nullptr;
     c->bus_ = bus;
-    const char* unique = nullptr;
-    if (sd_bus_get_unique_name(bus, &unique) >= 0) c->unique_name_ = safe(unique);
+    c->set_unique_name(bus);
     c->wake_fd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     if (c->wake_fd_ < 0) {
         if (error) *error = errno_text("eventfd", errno);
@@ -144,18 +197,37 @@ std::unique_ptr<Connection> Connection::open(BusKind kind, const std::string& ad
     // NameAcquired / NameLost are unicast to us; a local match routes them.
     auto m = std::make_unique<Match>();
     m->conn = self;
+    m->rule = kDaemonSignals;
     m->handler = [self](const Message& msg) {
         // The match also sees the daemon's NameOwnerChanged broadcasts.
         if (msg.member != "NameAcquired" && msg.member != "NameLost") return;
         if (!self->name_handler_ || msg.args.empty()) return;
         self->name_handler_(msg.args[0].as_string(), msg.member == "NameAcquired");
     };
-    r = sd_bus_match_signal(bus, &m->slot, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
-                            nullptr, match_trampoline, m.get());
-    if (r >= 0) c->matches_.emplace(c->next_id_++, std::move(m));
+    if (c->install_match(*m)) c->matches_.emplace(c->next_id_++, std::move(m));
     c->thread_ = std::thread([self] { self->run(); });
     c->thread_id_ = c->thread_.get_id();
     return c;
+}
+
+void Connection::set_unique_name(sd_bus* bus) {
+    const char* unique = nullptr;
+    std::string name;
+    if (bus && sd_bus_get_unique_name(bus, &unique) >= 0) name = safe(unique);
+    std::lock_guard<std::mutex> lock(name_mutex_);
+    unique_name_ = std::move(name);
+}
+
+bool Connection::install_match(Match& m) {
+    if (!bus_) return false;
+    return sd_bus_add_match(bus_, &m.slot, m.rule.c_str(), match_trampoline, &m) >= 0;
+}
+
+bool Connection::install_node(Node& n, std::string* error) {
+    if (!bus_) return true;  // installed on reconnection
+    int r = sd_bus_add_object(bus_, &n.slot, n.path.c_str(), node_trampoline, &n);
+    if (r < 0 && error) *error = errno_text("sd_bus_add_object", r);
+    return r >= 0;
 }
 
 Connection::~Connection() {
@@ -169,10 +241,21 @@ void Connection::shutdown() {
     if (thread_.joinable() && !on_bus_thread()) thread_.join();
 }
 
-std::string Connection::unique_name() const { return unique_name_; }
+std::string Connection::unique_name() const {
+    std::lock_guard<std::mutex> lock(name_mutex_);
+    return unique_name_;
+}
 
 void Connection::set_disconnect_handler(std::function<void()> handler) {
     run_sync([&] { disconnect_handler_ = std::move(handler); });
+}
+
+void Connection::set_reconnect_handler(std::function<void()> handler) {
+    run_sync([&] { reconnect_handler_ = std::move(handler); });
+}
+
+void Connection::set_auto_reconnect(bool on) {
+    run_sync([&] { auto_reconnect_ = on; });
 }
 
 void Connection::wake() {
@@ -237,22 +320,51 @@ int Connection::run_timers() {
     }
 }
 
-void Connection::close_bus() {
-    for (auto& [id, m] : matches_) sd_bus_slot_unref(m->slot);
-    matches_.clear();
-    for (auto& [path, n] : nodes_) sd_bus_slot_unref(n->slot);
-    nodes_.clear();
-    if (bus_) {
-        // Destroys floating async-call slots: their PendingCalls report
-        // "connection closed" to anyone waiting.
-        sd_bus_flush_close_unref(bus_);
-        bus_ = nullptr;
-    }
+void Connection::drop_bus() {
+    for (auto& [id, m] : matches_) m->slot = sd_bus_slot_unref(m->slot);
+    for (auto& [path, n] : nodes_) n->slot = sd_bus_slot_unref(n->slot);
     connected_ = false;
+    if (sd_bus* bus = bus_) {
+        bus_ = nullptr;
+        // Destroys floating async-call slots: their PendingCalls report
+        // "connection closed" to anyone waiting (bus_ is already null, so
+        // their handlers see a disconnected connection).
+        sd_bus_flush_close_unref(bus);
+    }
+}
+
+void Connection::close_bus() {
+    drop_bus();
+    matches_.clear();
+    nodes_.clear();
+}
+
+void Connection::lost() {
+    drop_bus();
+    if (disconnect_handler_) disconnect_handler_();
+    if (!auto_reconnect_ || stop_) return;
+    reconnect_delay_ = kFirstRetry;
+    timers_[next_id_++] = Timer{std::chrono::steady_clock::now() + reconnect_delay_, [this] { try_reconnect(); }};
+}
+
+void Connection::try_reconnect() {
+    if (stop_ || bus_) return;
+    std::string err;
+    sd_bus* bus = open_bus(kind_, without_guid(address_), description_, &err);
+    if (!bus) {
+        reconnect_delay_ = std::min(reconnect_delay_ * 2, kMaxRetry);
+        timers_[next_id_++] = Timer{std::chrono::steady_clock::now() + reconnect_delay_, [this] { try_reconnect(); }};
+        return;
+    }
+    bus_ = bus;
+    set_unique_name(bus);
+    connected_ = true;
+    for (auto& [id, m] : matches_) install_match(*m);
+    for (auto& [path, n] : nodes_) install_node(*n, nullptr);
+    if (reconnect_handler_) reconnect_handler_();
 }
 
 void Connection::run() {
-    bool reported_disconnect = false;
     while (!stop_) {
         run_jobs();
         if (bus_ && connected_) {
@@ -262,10 +374,7 @@ void Connection::run() {
             }
             if (r < 0 || !sd_bus_is_open(bus_)) connected_ = false;
         }
-        if (!connected_ && !reported_disconnect) {
-            reported_disconnect = true;
-            if (disconnect_handler_) disconnect_handler_();
-        }
+        if (bus_ && !connected_ && !stop_) lost();
         run_jobs();
         int timeout = run_timers();
         if (stop_) break;
@@ -447,12 +556,12 @@ void Connection::handle_match(Match& match, sd_bus_message* m) {
 
 uint64_t Connection::add_match(const std::string& rule, SignalHandler handler) {
     return run_sync([&]() -> uint64_t {
-        if (!bus_ || !connected_) return 0;
         auto m = std::make_unique<Match>();
         m->conn = this;
+        m->rule = rule;
         m->handler = std::move(handler);
-        int r = sd_bus_add_match(bus_, &m->slot, rule.c_str(), match_trampoline, m.get());
-        if (r < 0) return 0;
+        // While disconnected the match is kept and installed on reconnection.
+        if (bus_ && !install_match(*m)) return 0;
         uint64_t id = next_id_++;
         matches_.emplace(id, std::move(m));
         return id;
@@ -535,10 +644,6 @@ std::vector<std::string> Connection::list_names() {
 
 bool Connection::export_interface(const std::string& path, std::shared_ptr<Interface> iface, std::string* error) {
     return run_sync([&]() -> bool {
-        if (!bus_ || !connected_) {
-            if (error) *error = "not connected";
-            return false;
-        }
         if (!sd_bus_object_path_is_valid(path.c_str())) {
             if (error) *error = "invalid object path " + path;
             return false;
@@ -548,10 +653,8 @@ bool Connection::export_interface(const std::string& path, std::shared_ptr<Inter
             node = std::make_unique<Node>();
             node->conn = this;
             node->path = path;
-            int r = sd_bus_add_object(bus_, &node->slot, path.c_str(), node_trampoline, node.get());
-            if (r < 0) {
+            if (!install_node(*node, error)) {  // (while disconnected: installed on reconnection)
                 nodes_.erase(path);
-                if (error) *error = errno_text("sd_bus_add_object", r);
                 return false;
             }
         }

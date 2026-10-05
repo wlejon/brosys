@@ -234,6 +234,50 @@ void test_interaction() {
     CHECK(host->context_menu(id2, 1, 1).ok);
     expect_callbacks({cb_line(1, 2, WM_RBUTTONDOWN), cb_line(1, 2, WM_RBUTTONUP)}, m);
 
+    // Double click, keyboard selection, hover: version 4.
+    m = fx.client.mark();
+    CHECK(host->double_click(id1, 10, 20).ok);
+    expect_callbacks({cb_line(1, 0x0014000A, 0x10000 | WM_LBUTTONDOWN), cb_line(1, 0x0014000A, 0x10000 | WM_LBUTTONUP),
+                      cb_line(1, 0x0014000A, 0x10000 | NIN_SELECT), cb_line(1, 0x0014000A, 0x10000 | WM_LBUTTONDBLCLK),
+                      cb_line(1, 0x0014000A, 0x10000 | WM_LBUTTONUP)},
+                     m);
+    m = fx.client.mark();
+    CHECK(host->keyboard_select(id1, 3, 4).ok);
+    expect_callbacks({cb_line(1, 0x00040003, 0x10000 | NIN_KEYSELECT)}, m);
+    m = fx.client.mark();
+    CHECK(host->hover(id1, 1, 2, HoverPhase::Enter).ok);
+    CHECK(host->hover(id1, 2, 2, HoverPhase::Move).ok);
+    CHECK(host->hover(id1, 2, 2, HoverPhase::Leave).ok);
+    expect_callbacks({cb_line(1, 0x00020001, 0x10000 | WM_MOUSEMOVE), cb_line(1, 0x00020001, 0x10000 | NIN_POPUPOPEN),
+                      cb_line(1, 0x00020002, 0x10000 | WM_MOUSEMOVE), cb_line(1, 0x00020002, 0x10000 | NIN_POPUPCLOSE)},
+                     m);
+    // Version 0: no NIN_* at all; the keyboard is the right-button pair.
+    m = fx.client.mark();
+    CHECK(host->double_click(id2, 1, 1).ok);
+    expect_callbacks({cb_line(1, 2, WM_LBUTTONDOWN), cb_line(1, 2, WM_LBUTTONUP), cb_line(1, 2, WM_LBUTTONDBLCLK),
+                      cb_line(1, 2, WM_LBUTTONUP)},
+                     m);
+    m = fx.client.mark();
+    CHECK(host->keyboard_select(id2, 1, 1).ok);
+    expect_callbacks({cb_line(1, 2, WM_RBUTTONDOWN), cb_line(1, 2, WM_RBUTTONUP)}, m);
+    m = fx.client.mark();
+    CHECK(host->hover(id2, 1, 1, HoverPhase::Enter).ok);
+    CHECK(host->hover(id2, 1, 1, HoverPhase::Leave).ok);
+    expect_callbacks({cb_line(1, 2, WM_MOUSEMOVE)}, m);
+    // Version 3: NIN_SELECT / NIN_KEYSELECT, but no NIN_POPUP*.
+    CHECK_EQ(fx.client.command("add 3"), std::string("1"));
+    CHECK_EQ(fx.client.command("version 3 3"), std::string("1"));
+    const std::string id3 = fx.item_id(3);
+    m = fx.client.mark();
+    CHECK(host->keyboard_select(id3, 1, 1).ok);
+    CHECK(host->hover(id3, 1, 1, HoverPhase::Enter).ok);
+    CHECK(host->activate(id3, 1, 1).ok);
+    expect_callbacks({cb_line(1, 3, NIN_KEYSELECT), cb_line(1, 3, WM_MOUSEMOVE), cb_line(1, 3, WM_LBUTTONDOWN),
+                      cb_line(1, 3, WM_LBUTTONUP), cb_line(1, 3, NIN_SELECT)},
+                     m);
+    CHECK_EQ(fx.client.command("del 3"), std::string("1"));
+    CHECK(!host->hover("hwnd:0:0", 0, 0, HoverPhase::Enter).ok);
+
     CHECK(!host->activate("hwnd:0:0", 0, 0).ok);
     CHECK(!host->scroll(id1, 1, ScrollOrientation::Vertical).ok);
     CHECK(!host->menu(id1).has_value());

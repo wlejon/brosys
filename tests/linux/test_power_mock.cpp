@@ -382,6 +382,56 @@ void run_test() {
     ev = log.wait<PowerChanged>([](const PowerChanged& c) { return c.state.devices.size() == 2; }, 20000ms);
     CHECK(ev.has_value());
     if (ev) compare_with_cli(ev->state, bus);
+
+    // ---- the system bus daemon itself restarts (same address). Everything
+    // goes unknown; the service reconnects; logind (the fake) re-owns its
+    // name as the real one would be restarted with the bus; upowerd loses
+    // its bus and is started again, as systemd would.
+    log.skip_all();
+    REQUIRE(bus.restart());
+    pc = log.wait<PowerCapabilitiesChanged>(
+        [](const PowerCapabilitiesChanged& c) { return c.capabilities.suspend == Availability::Unknown; });
+    CHECK(pc.has_value());
+    daemon.reset();  // (whether upowerd exits by itself without its bus is upowerd's business)
+    daemon = std::make_unique<Upowerd>(upowerd, bed, bus, history.path());
+    CHECK(bstest::wait_until([&] {
+        return power->state().devices.size() == 2 && power->capabilities().suspend == Availability::Yes;
+    }, 20000ms));
+    CHECK(power->capabilities().lock == Availability::No);  // the third logind's answers
+    compare_with_cli(power->state(), bus);
+    // Both arrived as events too.
+    bool saw_devices = false, saw_caps = false;
+    for (auto& e : log.unseen()) {
+        if (auto* c = std::get_if<PowerChanged>(&e)) saw_devices |= c->state.devices.size() == 2;
+        if (auto* c = std::get_if<PowerCapabilitiesChanged>(&e)) saw_caps |= c->capabilities.suspend == Availability::Yes;
+    }
+    CHECK(saw_devices && saw_caps);
+    CHECK(power->request(brosys::PowerAction::Suspend).ok);  // calls go out on the new connection
+    CHECK(power->inhibit([] {
+        brosys::InhibitRequest r;
+        r.what = brosys::inhibit::Sleep;
+        r.who = "after-restart";
+        return r;
+    }(), &err) != nullptr);
+}
+
+// Neither UPower nor logind on the bus: no service, as NetworkService
+// without NetworkManager.
+void test_no_backend() {
+    bstest::PrivateBus empty;
+    REQUIRE(empty.ok());
+    brosys::PowerConfig cfg;
+    cfg.system_bus_address = empty.address();
+    std::string err;
+    CHECK(brosys::PowerService::create(cfg, &err) == nullptr);
+    CHECK(err.find("UPower") != std::string::npos && err.find("logind") != std::string::npos);
+    // logind alone is enough.
+    bstest::FakeLogind logind(empty.address(), bstest::FakeLogindConfig());
+    REQUIRE(logind.ok());
+    auto power = brosys::PowerService::create(cfg, &err);
+    REQUIRE(power);
+    CHECK(power->state().devices.empty());
+    CHECK(power->capabilities().suspend == Availability::Yes);
 }
 #endif  // BROSYS_HAVE_UMOCKDEV
 
@@ -408,5 +458,8 @@ int main(int, char** argv) {
 #endif
     (void)argv;
     run_test();
+#ifdef BROSYS_HAVE_UMOCKDEV
+    test_no_backend();
+#endif
     return bstest::finish(kName);
 }

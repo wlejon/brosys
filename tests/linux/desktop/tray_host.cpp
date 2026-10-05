@@ -2,6 +2,7 @@
 // it owns org.kde.StatusNotifierWatcher (when free) and prints what it sees.
 //
 //   ROLE <role> <detail>   ADDED <id>   CHANGED <id> <bits>   REMOVED <id>   MENU <id>
+//   DROPPED <id> <reason>
 //
 // usage: brosys_tray_host --bus ADDRESS [--no-watcher]
 #include "brosys/tray.h"
@@ -51,6 +52,8 @@ int main(int argc, char** argv) {
                         say("REMOVED " + e.id);
                     else if constexpr (std::is_same_v<T, brosys::TrayMenuChanged>)
                         say("MENU " + e.item_id);
+                    else if constexpr (std::is_same_v<T, brosys::TrayItemDropped>)
+                        say("DROPPED " + e.id + " " + e.reason);
                 },
                 ev);
         }

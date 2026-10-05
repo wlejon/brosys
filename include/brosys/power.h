@@ -162,7 +162,10 @@ struct PowerConfig {
 class PowerService {
 public:
     // Starts the backend thread; the first PowerChanged is queued before
-    // create() returns. nullptr + *error when the platform service is absent.
+    // create() returns. nullptr + *error when the platform service is absent
+    // (Linux: neither UPower nor logind is on the system bus). Once created,
+    // the service survives either daemon, or the system bus itself,
+    // restarting: values go unknown while it is away and reload when it is back.
     static std::unique_ptr<PowerService> create(const PowerConfig& config, std::string* error);
     virtual ~PowerService() = default;
 

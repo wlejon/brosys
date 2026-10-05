@@ -3,6 +3,8 @@
 #include "linux/tray/host.h"
 
 #include <chrono>
+#include <type_traits>
+#include <variant>
 
 namespace brosys::tray {
 
@@ -35,23 +37,34 @@ LinuxTrayHost::ItemState* LinuxTrayHost::find_item(const std::string& id, uint64
     return &it->second;
 }
 
-void LinuxTrayHost::item_appeared(const std::string& id) {
+void LinuxTrayHost::item_appeared(const std::string& id, ItemFlavor flavor) {
     if (stopping_ || items_.count(id)) return;
     ItemState st;
-    if (!split_item_id(id, &st.service, &st.path)) return;
+    if (!split_item_id(id, &st.service, &st.path)) {
+        events_.push(TrayItemDropped{id, "not a \"<bus name><object path>\" item id"});
+        return;
+    }
     st.owner = st.service[0] == ':' ? st.service : conn_->get_name_owner(st.service);
-    if (st.owner.empty()) return;  // already gone
+    if (st.owner.empty()) {
+        events_.push(TrayItemDropped{id, st.service + " has no owner (the item left before it could be queried)"});
+        return;
+    }
+    // Registered through the freedesktop watcher interface: most likely the
+    // freedesktop item interface too (the other one is tried if it fails).
+    st.iface = flavor == ItemFlavor::Freedesktop ? kFdoItemIface : kItemIface;
     dbus::Reply pid = conn_->call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
                                   "GetConnectionUnixProcessID", {Value::str(st.owner)});
     if (pid.ok && pid.first()) st.pid = static_cast<uint32_t>(pid.first()->as_uint());
     st.epoch = next_epoch_++;
     const uint64_t epoch = st.epoch;
     st.item_match = conn_->add_match(
-        "type='signal',sender='" + st.owner + "',path='" + st.path + "',interface='" + kItemIface + "'",
+        "type='signal',sender='" + st.owner + "',path='" + st.path + "'",
         [this, id, epoch](const dbus::Message& m) {
             // NewTitle, NewIcon, NewAttentionIcon, NewOverlayIcon, NewToolTip,
             // NewStatus, NewIconThemePath, NewMenu (+ vendor extensions): refetch.
-            if (!stopping_ && m.member.rfind("New", 0) == 0 && find_item(id, epoch)) fetch_item(id);
+            if (stopping_ || m.member.rfind("New", 0) != 0) return;
+            if (m.interface != kItemIface && m.interface != kFdoItemIface) return;
+            if (find_item(id, epoch)) fetch_item(id);
         });
     {
         std::lock_guard<std::mutex> lock(mu_);
@@ -60,7 +73,7 @@ void LinuxTrayHost::item_appeared(const std::string& id) {
     fetch_item(id);
 }
 
-void LinuxTrayHost::item_vanished(const std::string& id) {
+void LinuxTrayHost::item_vanished(const std::string& id, const std::string& why) {
     auto it = items_.find(id);
     if (it == items_.end()) return;
     if (it->second.item_match) conn_->remove_match(it->second.item_match);
@@ -70,13 +83,16 @@ void LinuxTrayHost::item_vanished(const std::string& id) {
         std::lock_guard<std::mutex> lock(mu_);
         items_.erase(it);
     }
-    if (announced) events_.push(TrayItemRemoved{id});
+    if (announced)
+        events_.push(TrayItemRemoved{id});
+    else
+        events_.push(TrayItemDropped{id, why});
 }
 
-void LinuxTrayHost::clear_items() {
+void LinuxTrayHost::clear_items(const std::string& why) {
     std::vector<std::string> ids;
     for (auto& [id, st] : items_) ids.push_back(id);
-    for (auto& id : ids) item_vanished(id);
+    for (auto& id : ids) item_vanished(id, why);
 }
 
 void LinuxTrayHost::fetch_item(const std::string& id) {
@@ -88,26 +104,34 @@ void LinuxTrayHost::fetch_item(const std::string& id) {
     }
     st->fetching = true;
     const uint64_t epoch = st->epoch;
-    conn_->get_all_properties_async(st->service, st->path, kItemIface,
-                                    [this, id, epoch](bool ok, std::map<std::string, Value> props, std::string) {
-                                        if (!stopping_) apply_item(id, epoch, ok, props);
+    conn_->get_all_properties_async(st->service, st->path, st->iface,
+                                    [this, id, epoch](bool ok, std::map<std::string, Value> props, std::string err) {
+                                        if (!stopping_) apply_item(id, epoch, ok, props, err);
                                     });
 }
 
 void LinuxTrayHost::apply_item(const std::string& id, uint64_t epoch, bool ok,
-                               const std::map<std::string, Value>& props) {
+                               const std::map<std::string, Value>& props, const std::string& error) {
     ItemState* st = find_item(id, epoch);
     if (!st) return;
     st->fetching = false;
+    // Some implementations answer GetAll for an interface they lack with no properties.
+    if (ok && props.empty() && !st->announced) ok = false;
     if (!ok) {
         if (!st->announced) {
-            // Some items register a moment before their object answers.
+            // Some items register a moment before their object answers, and
+            // the item interface may be the other flavour: alternate them.
+            std::string tried = st->iface;
             if (st->retries++ < kFirstFetchRetries) {
-                conn_->add_timer(std::chrono::milliseconds(100 * st->retries), [this, id, epoch] {
-                    if (!stopping_ && find_item(id, epoch)) fetch_item(id);
-                });
+                std::lock_guard<std::mutex> lock(mu_);
+                st->iface = st->iface == kItemIface ? kFdoItemIface : kItemIface;
+                conn_->add_timer(std::chrono::milliseconds(st->retries == 1 ? 0 : 100 * st->retries),
+                                 [this, id, epoch] {
+                                     if (!stopping_ && find_item(id, epoch)) fetch_item(id);
+                                 });
             } else {
-                item_vanished(id);
+                item_vanished(id, "its object never answered GetAll(" + tried + ") at " + st->service + st->path +
+                                      (error.empty() ? std::string() : ": " + error));
             }
             return;
         }
@@ -226,6 +250,7 @@ bool LinuxTrayHost::locate(const std::string& id, Target* t, std::string* why) c
     t->service = it->second.service;
     t->path = it->second.path;
     t->menu_path = it->second.menu_path;
+    t->iface = it->second.iface;
     t->epoch = it->second.epoch;
     return true;
 }
@@ -234,8 +259,26 @@ Result LinuxTrayHost::call_item(const std::string& id, const char* method, const
     Target t;
     std::string why;
     if (!locate(id, &t, &why)) return Result::failure(why);
-    dbus::Reply r = conn_->call(t.service, t.path, kItemIface, method, args, kInteractionTimeoutMs);
+    dbus::Reply r = conn_->call(t.service, t.path, t.iface, method, args, kInteractionTimeoutMs);
     return r.ok ? Result::success() : Result::failure(r.error());
+}
+
+Result LinuxTrayHost::double_click(const std::string& item_id, int32_t, int32_t) {
+    Target t;
+    std::string why;
+    if (!locate(item_id, &t, &why)) return Result::failure(why);
+    return Result::failure("StatusNotifierItem has no double click (hosts send Activate per click)");
+}
+
+Result LinuxTrayHost::keyboard_select(const std::string& item_id, int32_t x, int32_t y) {
+    return call_item(item_id, "Activate", {Value::i32(x), Value::i32(y)});
+}
+
+Result LinuxTrayHost::hover(const std::string& item_id, int32_t, int32_t, HoverPhase) {
+    Target t;
+    std::string why;
+    if (!locate(item_id, &t, &why)) return Result::failure(why);
+    return Result::failure("StatusNotifierItem has no hover interaction (the host shows the ToolTip property)");
 }
 
 Result LinuxTrayHost::activate(const std::string& item_id, int32_t x, int32_t y) {
@@ -274,16 +317,28 @@ Result LinuxTrayHost::menu_about_to_show(const std::string& item_id, int32_t men
     return Result::success();
 }
 
-Result LinuxTrayHost::menu_event(const std::string& item_id, int32_t menu_item_id, MenuEventType type) {
+Result LinuxTrayHost::menu_event(const std::string& item_id, int32_t menu_item_id, MenuEventType type,
+                                 const MenuEventData& data) {
     Target t;
     std::string why;
     if (!locate(item_id, &t, &why)) return Result::failure(why);
     if (t.menu_path.empty()) return Result::failure("tray item " + item_id + " has no menu");
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
+    uint32_t timestamp = data.timestamp;
+    if (!timestamp)
+        timestamp = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                              std::chrono::steady_clock::now().time_since_epoch())
+                                              .count());
+    Value payload = std::visit(
+        [](const auto& v) -> Value {
+            using T = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<T, int32_t>) return Value::i32(v);
+            else if constexpr (std::is_same_v<T, std::string>) return Value::str(v);
+            else return Value::boolean(v);
+        },
+        data.data);
     dbus::Reply r = conn_->call(t.service, t.menu_path, kMenuIface, "Event",
-                                {Value::i32(menu_item_id), Value::str(event_name(type)), Value::variant(Value::i32(0)),
-                                 Value::u32(static_cast<uint32_t>(ms))},
+                                {Value::i32(menu_item_id), Value::str(event_name(type)), Value::variant(payload),
+                                 Value::u32(timestamp)},
                                 kInteractionTimeoutMs);
     return r.ok ? Result::success() : Result::failure(r.error());
 }

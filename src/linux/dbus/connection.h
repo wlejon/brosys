@@ -12,6 +12,17 @@
 // Destroying the Connection stops and joins the thread first, so a service
 // that owns its Connection as the first-destroyed member (declare it last)
 // can capture `this` in handlers.
+//
+// Reconnection: when the bus drops (its daemon restarted or went away), the
+// disconnect handler runs, then the connection retries the same bus (the
+// same address, or the same default bus) with a backoff of 50 ms doubling to
+// 2 s; a "guid=" in the address is dropped for these attempts, since a
+// restarted daemon has a new one. Once it is back, every match rule and
+// exported object is installed again and the reconnect handler runs. The
+// unique name is a new one, and
+// well-known names are not re-requested: their owners do that in the
+// reconnect handler. Calls made while disconnected fail at once; matches
+// added and objects exported meanwhile are installed on reconnection.
 #pragma once
 
 #include "linux/dbus/object.h"
@@ -89,8 +100,12 @@ public:
 
     std::string unique_name() const;
     bool connected() const { return connected_.load(); }
-    // Called on the bus thread once when the connection drops.
+    // Called on the bus thread each time the connection drops.
     void set_disconnect_handler(std::function<void()> handler);
+    // Called on the bus thread each time the connection is back (see above).
+    void set_reconnect_handler(std::function<void()> handler);
+    // Off: a dropped connection stays down (default on).
+    void set_auto_reconnect(bool on);
 
     // ---- threading
     bool on_bus_thread() const { return std::this_thread::get_id() == thread_id_; }
@@ -182,6 +197,12 @@ private:
     void run_jobs();
     int run_timers();  // returns ms until the next timer (-1 none)
     void close_bus();
+    void drop_bus();       // releases the bus and every slot (matches / nodes are kept)
+    void lost();           // the connection dropped: report, then start reconnecting
+    void try_reconnect();  // one attempt (bus thread)
+    void set_unique_name(sd_bus* bus);
+    bool install_match(Match& m);
+    bool install_node(Node& n, std::string* error);
     Reply call_on_thread(const std::string& destination, const std::string& path, const std::string& interface,
                          const std::string& member, const Args& args, int timeout_ms);
     void call_async_on_thread(const std::string& destination, const std::string& path, const std::string& interface,
@@ -189,13 +210,16 @@ private:
     std::vector<std::string> child_names(const std::string& path) const;
     int reply_properties(sd_bus_message* m, Node& node, const std::string& member);
 
+    BusKind kind_ = BusKind::Session;
+    std::string address_, description_;
     sd_bus* bus_ = nullptr;
     int wake_fd_ = -1;
     std::thread thread_;
     std::thread::id thread_id_;
     std::atomic<bool> stop_{false};
     std::atomic<bool> connected_{false};
-    std::string unique_name_;
+    mutable std::mutex name_mutex_;
+    std::string unique_name_;  // guarded by name_mutex_
 
     std::mutex jobs_mutex_;
     std::deque<std::function<void()>> jobs_;
@@ -211,7 +235,10 @@ private:
     std::map<uint64_t, std::unique_ptr<Match>> matches_;
     std::map<std::string, std::unique_ptr<Node>> nodes_;
     std::function<void()> disconnect_handler_;
+    std::function<void()> reconnect_handler_;
     std::function<void(const std::string&, bool)> name_handler_;
+    bool auto_reconnect_ = true;
+    std::chrono::milliseconds reconnect_delay_{50};
 };
 
 }  // namespace brosys::dbus

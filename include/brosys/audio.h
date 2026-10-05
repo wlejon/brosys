@@ -2,7 +2,9 @@
 // direction, volume / mute, and change events.
 //
 // Linux: a PipeWire client (audio Sink / Source nodes, the "default"
-// metadata, device Route volumes the way wpctl / pactl set them).
+// metadata, device Route volumes the way wpctl / pactl set them). When the
+// PipeWire server goes away every device is removed; the client reconnects
+// to the same remote when it is back and the devices are added again.
 // Windows: Core Audio (IMMDeviceEnumerator, IMMNotificationClient,
 // IAudioEndpointVolume + IAudioEndpointVolumeCallback).
 // macOS: the CoreAudio HAL with property listeners. A device appears once per

@@ -79,6 +79,11 @@ FakeLogind::FakeLogind(const std::string& bus_address, FakeLogindConfig config) 
         if (error_.empty()) error_ = "org.freedesktop.login1 is taken";
         return;
     }
+    // Survives the bus restarting, as the real logind is restarted with it.
+    conn_->set_reconnect_handler([this] {
+        std::string e;
+        conn_->request_name("org.freedesktop.login1", 0, &e);
+    });
     ok_ = true;
 }
 

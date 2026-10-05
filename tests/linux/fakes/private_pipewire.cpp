@@ -85,27 +85,34 @@ PrivatePipeWire::PrivatePipeWire(const std::vector<NullNode>& nodes) {
     for (const char* sub : {"/run", "/config", "/state", "/data"})
         mkdir((dir_->path() + sub).c_str(), 0700);
     socket_ = runtime_ + "/pipewire-0";
-    std::string conf = dir_->path() + "/brosys-pipewire.conf";
-    if (!write_file(conf, pipewire_conf(nodes))) {
-        error_ = "cannot write " + conf;
+    conf_ = dir_->path() + "/brosys-pipewire.conf";
+    nodes_ = nodes;
+    if (!write_file(conf_, pipewire_conf(nodes))) {
+        error_ = "cannot write " + conf_;
         return;
     }
+    error_ = launch();
+}
 
-    pipewire_ = Daemon({"pipewire", "-c", conf}, env(), false);
-    if (!wait_path(socket_, std::chrono::milliseconds(10000))) {
-        error_ = "pipewire did not create " + socket_;
-        return;
-    }
+bool PrivatePipeWire::restart_pipewire() {
+    kill_pipewire();
+    ::unlink(socket_.c_str());  // a killed server can leave its socket behind
+    ::unlink((socket_ + ".lock").c_str());
+    error_ = launch();
+    return error_.empty();
+}
+
+std::string PrivatePipeWire::launch() {
+    const auto& nodes = nodes_;
+    pipewire_ = Daemon({"pipewire", "-c", conf_}, env(), false);
+    if (!wait_path(socket_, std::chrono::milliseconds(10000))) return "pipewire did not create " + socket_;
     wireplumber_ = Daemon({"wireplumber", "--profile", "policy"}, env(), false);
     // Ready once WirePlumber has chosen a default sink.
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(15000);
     while (true) {
         auto r = run({"wpctl", "inspect", "@DEFAULT_AUDIO_SINK@"}, env(), std::chrono::milliseconds(5000));
         if (r.exit_code == 0 && r.out.find("node.name") != std::string::npos) break;
-        if (std::chrono::steady_clock::now() >= deadline) {
-            error_ = "WirePlumber did not pick a default sink";
-            return;
-        }
+        if (std::chrono::steady_clock::now() >= deadline) return "WirePlumber did not pick a default sink";
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     // An adapter node ignores Props (volume / mute) until it has run once:
@@ -120,9 +127,11 @@ PrivatePipeWire::PrivatePipeWire(const std::vector<NullNode>& nodes) {
         }
     }
     if (have_program("pipewire-pulse") && have_program("pactl")) {
+        ::unlink((runtime_ + "/pulse/native").c_str());
         pulse_daemon_ = Daemon({"pipewire-pulse"}, env(), false);
         pulse_ = wait_path(runtime_ + "/pulse/native", std::chrono::milliseconds(10000));
     }
+    return {};
 }
 
 PrivatePipeWire::~PrivatePipeWire() {

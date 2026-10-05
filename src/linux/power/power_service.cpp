@@ -36,12 +36,24 @@ public:
     bool start(const PowerConfig& config, std::string* error) {
         conn_ = dbus::Connection::open(dbus::BusKind::System, config.system_bus_address, "brosys-power", error);
         if (!conn_) return false;
-        conn_->run_sync([this] {
+        bool up = conn_->run_sync([this] {
             install_watches();
             reload_upower();
             refresh_capabilities();
             publish(true);
+            return upower_up_ || logind_up_;
         });
+        if (!up) {
+            // As NetworkService without NetworkManager: no backend, no service.
+            if (error)
+                *error = "neither UPower (org.freedesktop.UPower) nor logind (org.freedesktop.login1) is running";
+            return false;
+        }
+        // The system bus itself restarting: while it is down every call
+        // fails, so a resync reports everything unknown; once the connection
+        // is back the same resync reloads both daemons.
+        conn_->set_disconnect_handler([this] { resync(); });
+        conn_->set_reconnect_handler([this] { resync(); });
         return true;
     }
 
@@ -155,6 +167,12 @@ private:
                                 });
     }
 
+    void resync() {
+        reload_upower();
+        refresh_capabilities();
+        publish();
+    }
+
     void reload_upower() {
         devices_.clear();
         std::string err;
@@ -212,9 +230,9 @@ private:
         c.hybrid_sleep = can("CanHybridSleep");
         c.reboot = can("CanReboot");
         c.power_off = can("CanPowerOff");
-        bool logind_up = !conn_->get_name_owner(upower::kLogindService).empty();
-        session_path_ = logind_up ? find_session() : std::string();
-        c.lock = !logind_up ? Availability::Unknown : session_path_.empty() ? Availability::No : Availability::Yes;
+        logind_up_ = !conn_->get_name_owner(upower::kLogindService).empty();
+        session_path_ = logind_up_ ? find_session() : std::string();
+        c.lock = !logind_up_ ? Availability::Unknown : session_path_.empty() ? Availability::No : Availability::Yes;
         caps_pending_ = c;
     }
 
@@ -284,6 +302,7 @@ private:
 
     // Bus-thread state.
     bool upower_up_ = false;
+    bool logind_up_ = false;
     Props manager_props_;
     std::map<std::string, Props> devices_;  // every enumerated device (filtering happens in build())
     PowerCapabilities caps_pending_;

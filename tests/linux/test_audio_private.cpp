@@ -2,7 +2,8 @@
 // with null sinks / sources: the initial model, volume / mute / default set
 // through the library and verified with wpctl and pactl, the same changes
 // made by wpctl / pactl arriving as events, nodes appearing and vanishing
-// at runtime (pw-cli), and the server going away.
+// at runtime (pw-cli), and the server going away and coming back (a real
+// restart of pipewire + WirePlumber on the same socket).
 #include "brosys/audio.h"
 #include "check.h"
 #include "linux/audio_cli.h"
@@ -207,6 +208,42 @@ void run_test() {
     CHECK_EQ(removed, 4);
     CHECK(audio->state().default_output.empty() && audio->state().default_input.empty());
     CHECK(!audio->set_volume(kSinkA, 0.5f).ok);
+
+    // ---- it comes back (same socket, config and WirePlumber state): the
+    // service reconnects by itself and every device is added again, as
+    // wpctl sees them; defaults are WirePlumber's (it may restore the one
+    // set above), checked against wpctl rather than assumed.
+    for (int round = 0; round < 2; ++round) {
+        log.skip_all();
+        REQUIRE(pw.restart_pipewire());
+        CHECK(bstest::wait_until([&] {
+            auto st = audio->state();
+            return st.devices.size() == 4 && !st.default_output.empty() && !st.default_input.empty();
+        }, 15000ms));
+        int added = 0;
+        for (auto& e : log.unseen()) added += std::holds_alternative<AudioDeviceAdded>(e);
+        CHECK_EQ(added, 4);
+        auto back = audio->state();
+        for (auto& d : back.devices) {
+            CHECK_EQ(cli::wpctl_prop(std::to_string(d.native_id), "node.name", env), d.id);
+            auto v = cli::wpctl_volume(std::to_string(d.native_id), env);
+            CHECK(v && near(v->volume, d.volume) && v->muted == d.muted);
+        }
+        CHECK_EQ(cli::wpctl_prop("@DEFAULT_AUDIO_SINK@", "node.name", env), back.default_output);
+        CHECK_EQ(cli::wpctl_prop("@DEFAULT_AUDIO_SOURCE@", "node.name", env), back.default_input);
+        // Mutations work on the new connection.
+        float target = round == 0 ? 0.3f : 0.6f;
+        CHECK(audio->set_volume(kSinkB, target).ok);
+        CHECK(log.wait<AudioDeviceChanged>([&](const AudioDeviceChanged& c) {
+            return c.device.id == kSinkB && near(c.device.volume, target, 1e-3f);
+        }));
+        auto cur = current(*audio, kSinkB);
+        REQUIRE(cur.has_value());
+        auto v = cli::wpctl_volume(std::to_string(cur->native_id), env);
+        CHECK(v && near(v->volume, target));
+        if (round == 0) pw.kill_pipewire();  // the next round starts from a dead server too
+        if (round == 0) CHECK(bstest::wait_until([&] { return audio->state().devices.empty(); }, 10000ms));
+    }
 }
 
 }  // namespace

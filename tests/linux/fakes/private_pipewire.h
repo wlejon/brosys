@@ -33,11 +33,17 @@ public:
     Env env() const;  // for wpctl / pactl / pw-cli against this instance
 
     void kill_pipewire();
+    // Stops the servers (if running) and starts them again on the same
+    // socket, configuration and state (a restart, as systemd does it).
+    bool restart_pipewire();
 
 private:
+    std::string launch();  // "" or why it failed
+
     std::unique_ptr<TempDir> dir_;
     std::unique_ptr<PrivateBus> bus_;
-    std::string runtime_, socket_;
+    std::string runtime_, socket_, conf_;
+    std::vector<NullNode> nodes_;
     Daemon pipewire_, wireplumber_, pulse_daemon_;
     bool pulse_ = false;
     std::string error_;

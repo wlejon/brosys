@@ -154,7 +154,17 @@ void check_inhibitor(brosys::PowerService& power) {
 int main() {
     std::string err;
     auto power = brosys::PowerService::create(brosys::PowerConfig(), &err);
-    if (!power) bstest::skip(kName, "no system bus: " + err);
+    if (!power) {
+        // Refusing is right only when busctl agrees that neither daemon is there.
+        bool upower = bstest::run({"busctl", "status", "org.freedesktop.UPower"}).exit_code == 0;
+        bool logind = bstest::run({"busctl", "status", "org.freedesktop.login1"}).exit_code == 0;
+        if (upower || logind) {
+            bstest::fail(__FILE__, __LINE__, "create() failed although busctl sees " +
+                                                 std::string(upower ? "UPower" : "logind") + ": " + err);
+            return bstest::finish(kName);
+        }
+        bstest::skip(kName, "no power backend on the system bus: " + err);
+    }
     auto first = power->events().drain();
     CHECK(first.size() >= 2);
     CHECK(!first.empty() && std::holds_alternative<brosys::PowerChanged>(first[0]));

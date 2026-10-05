@@ -237,6 +237,46 @@ void test_balloons() {
     expect_no_cb(cm);
 }
 
+// Balloons shown while no server is attached are held, and delivered when one
+// attaches (after its status): the latest per icon, none that was cleared.
+void test_held_balloons() {
+    CHECK_EQ(fx.client.command("add 2"), std::string("1"));  // (test_balloons deleted it)
+    size_t cm = fx.client.mark();
+    CHECK_EQ(fx.client.command("balloon 1 1 Early|first"), std::string("1"));
+    CHECK_EQ(fx.client.command("balloon 2 1 Gone|cleared"), std::string("1"));
+    CHECK_EQ(fx.client.command("clearballoon 2"), std::string("1"));
+    CHECK_EQ(fx.client.command("balloon 1 1 Early|second"), std::string("1"));  // replaces the held one
+    expect_no_cb(cm);  // nothing is showing yet, so the icon hears nothing
+
+    NotificationServerConfig cfg;
+    cfg.balloon_source = host.get();
+    cfg.default_timeout_ms = 0;
+    std::string error;
+    cm = fx.client.mark();
+    auto server = NotificationServer::create(cfg, &error);
+    REQUIRE(server != nullptr);
+    NLog log(server->events());
+    size_t status_at = 0, posted_at = 0;
+    auto st = log.wait<NotificationServerStatus>([](const NotificationServerStatus&) { return true; }, 0, 1s, &status_at);
+    CHECK(st && st->active);
+    auto p = log.wait<NotificationPosted>([](const NotificationPosted&) { return true; }, 0, 5s, &posted_at);
+    REQUIRE(p.has_value());
+    CHECK(status_at < posted_at);
+    CHECK_EQ(p->notification.summary, std::string("Early"));
+    CHECK_EQ(p->notification.body, std::string("second"));
+    CHECK_EQ(p->notification.sender, fx.item_id(1));
+    CHECK(!p->replaced);
+    expect_cb(cm, cb_line(1, 0, 0x10000 | NIN_BALLOONSHOW));
+    std::this_thread::sleep_for(200ms);
+    CHECK_EQ(log.count<NotificationPosted>([](const NotificationPosted&) { return true; }), size_t(1));
+    CHECK_EQ(server->active().size(), size_t(1));
+    // Closing it tells the icon, as for any balloon.
+    cm = fx.client.mark();
+    CHECK(server->close(p->notification.id, CloseReason::Closed).ok);
+    expect_cb(cm, cb_line(1, 0, 0x10000 | NIN_BALLOONHIDE));
+    CHECK_EQ(fx.client.command("del 2"), std::string("1"));
+}
+
 void test_expiry_and_source_gone() {
     NotificationServerConfig cfg;
     cfg.balloon_source = host.get();
@@ -305,6 +345,7 @@ int main() {
 
     test_capabilities();
     test_balloons();
+    test_held_balloons();
     test_expiry_and_source_gone();
 
     host.reset();

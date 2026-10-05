@@ -5,7 +5,9 @@
 // implements the Desktop Notifications Specification 1.2 completely: Notify
 // (replaces_id, actions, hints, expire_timeout), CloseNotification,
 // GetCapabilities, GetServerInformation, the NotificationClosed /
-// ActionInvoked / ActivationToken signals.
+// ActionInvoked / ActivationToken signals. When the session bus daemon
+// restarts, the server reconnects and asks for the name again (status
+// inactive while the bus is down); notifications already shown stay.
 // Windows: notifications reach a process only when it is the shell. In shell
 // mode the tray host's balloon notifications (Shell_NotifyIcon NIF_INFO)
 // become notifications here and interaction is reported back to the icon
@@ -98,8 +100,8 @@ struct NotificationClosed {
     CloseReason reason = CloseReason::Undefined;
 };
 
-// Lost (or regained) ownership of the service name; while lost the server
-// receives nothing.
+// Lost (or regained) ownership of the service name, or the bus connection;
+// while inactive the server receives nothing.
 struct NotificationServerStatus {
     bool active = false;
     std::string detail;

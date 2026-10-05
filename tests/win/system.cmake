@@ -13,3 +13,8 @@ endforeach()
 if(TARGET test_win_power)
     target_link_libraries(test_win_power PRIVATE powrprof user32)
 endif()
+
+# A real adapter created and removed by the test (Microsoft KM-TEST Loopback,
+# the inbox netloop.inf). Device installation needs elevation: skips otherwise.
+brosys_test(test_win_network_adapter SOURCES win/test_win_network_adapter.cpp LIBS brosys_win_oracle TIMEOUT 180)
+target_link_libraries(test_win_network_adapter PRIVATE setupapi newdev advapi32)

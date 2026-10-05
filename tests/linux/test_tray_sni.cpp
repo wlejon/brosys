@@ -35,10 +35,12 @@ struct ItemProc {
     std::unique_ptr<bstest::Daemon> proc;
     std::string unique, id;
 
-    static ItemProc start(const bstest::PrivateBus& bus, const std::string& mode, bool expect_registered = true) {
+    static ItemProc start(const bstest::PrivateBus& bus, const std::string& mode, bool expect_registered = true,
+                          const std::vector<std::string>& extra = {}) {
         ItemProc p;
-        p.proc = std::make_unique<bstest::Daemon>(
-            std::vector<std::string>{BROSYS_SNI_ITEM, "--bus", bus.address(), "--mode", mode});
+        std::vector<std::string> argv{BROSYS_SNI_ITEM, "--bus", bus.address(), "--mode", mode};
+        argv.insert(argv.end(), extra.begin(), extra.end());
+        p.proc = std::make_unique<bstest::Daemon>(argv);
         std::string line;
         if (!p.proc->wait_for_line("READY ", 10000ms, &line)) return p;
         std::istringstream in(line);
@@ -242,6 +244,20 @@ void test_watcher_role(const bstest::PrivateBus& bus) {
     CHECK(item.proc->wait_for_line("EVENT 5 hovered", 5000ms));
     CHECK(host->menu_event(item.id, 4, MenuEventType::Closed).ok);
     CHECK(item.proc->wait_for_line("EVENT 4 closed", 5000ms));
+    // The Event payload: an int32 0 and the call time by default, else what the host gives.
+    std::string line;
+    CHECK(host->menu_event(item.id, 1, MenuEventType::Clicked).ok);
+    CHECK(item.proc->wait_for_line("EVENT 1 clicked", 5000ms, &line));
+    CHECK(line.find(" i:0 ") != std::string::npos && line.substr(line.rfind(' ') + 1) != "0");
+    MenuEventData data;
+    data.data = std::string("chosen");
+    data.timestamp = 123456;
+    CHECK(host->menu_event(item.id, 3, MenuEventType::Clicked, data).ok);
+    CHECK(item.proc->wait_for_line("EVENT 3 clicked s:chosen 123456", 5000ms));
+    data.data = true;
+    data.timestamp = 7;
+    CHECK(host->menu_event(item.id, 5, MenuEventType::Hovered, data).ok);
+    CHECK(item.proc->wait_for_line("EVENT 5 hovered b:true 7", 5000ms));
 
     // Item interaction.
     CHECK(host->activate(item.id, 10, 20).ok);
@@ -254,6 +270,14 @@ void test_watcher_role(const bstest::PrivateBus& bus) {
     CHECK(item.proc->wait_for_line("SCROLL 5 horizontal", 5000ms));
     CHECK(host->scroll(item.id, -120, ScrollOrientation::Vertical).ok);
     CHECK(item.proc->wait_for_line("SCROLL -120 vertical", 5000ms));
+    // Keyboard selection is Activate; SNI has no double click or hover.
+    CHECK(host->keyboard_select(item.id, 11, 12).ok);
+    CHECK(item.proc->wait_for_line("ACTIVATE 11 12", 5000ms));
+    Result no = host->double_click(item.id, 0, 0);
+    CHECK(!no.ok && no.error.find("double click") != std::string::npos);
+    no = host->hover(item.id, 0, 0, HoverPhase::Enter);
+    CHECK(!no.ok && no.error.find("hover") != std::string::npos);
+    CHECK(!host->keyboard_select("nope/x", 0, 0).ok);
     CHECK(!host->activate("nope/x", 0, 0).ok);
     CHECK(!host->menu_event("nope/x", 1, MenuEventType::Clicked).ok);
     CHECK(host->set_item_rect(item.id, Rect32{1, 2, 3, 4}).ok);
@@ -291,7 +315,79 @@ void test_watcher_role(const bstest::PrivateBus& bus) {
         return m.member == "StatusNotifierItemUnregistered" && !m.args.empty() &&
                m.args[0].as_string().find("/Bogus") != std::string::npos;
     }) >= 0);
+    auto dropped = log.wait<TrayItemDropped>(
+        [](const TrayItemDropped& d) { return d.id.find("/Bogus") != std::string::npos; }, 5000ms);
+    CHECK(dropped && !dropped->reason.empty());
     CHECK(!log.seen<TrayItemAdded>([](const TrayItemAdded&) { return true; }, 500ms));
+
+    // A live process whose item object never answers: dropped once the
+    // retries (on both item interfaces) run out, with the reason.
+    ItemProc broken = ItemProc::start(bus, "path", true, {"--broken", "1"});
+    REQUIRE(broken.ok());
+    dropped = log.wait<TrayItemDropped>([&](const TrayItemDropped& d) { return d.id == broken.id; }, 10000ms);
+    REQUIRE(dropped.has_value());
+    CHECK(dropped->reason.find("never answered") != std::string::npos);
+    CHECK(!log.seen<TrayItemAdded>([&](const TrayItemAdded& e) { return e.item.id == broken.id; }, 300ms));
+    CHECK(host->items().empty());
+}
+
+// The freedesktop flavour: the same registry under
+// org.freedesktop.StatusNotifierWatcher (signals on both interfaces), and an
+// item that implements org.freedesktop.StatusNotifierItem.
+void test_freedesktop_flavor(const bstest::PrivateBus& bus) {
+    constexpr const char* kFdo = "org.freedesktop.StatusNotifierWatcher";
+    bstest::SignalLog sig(bus.address(), std::string("type='signal',interface='") + kFdo + "'");
+    auto host = make_host(bus);
+    REQUIRE(host);
+    Log log(host->events());
+    auto st = log.wait<TrayHostStatus>([](const TrayHostStatus& s) { return s.role == TrayRole::Watcher; });
+    REQUIRE(st);
+    CHECK(st->detail.find(kFdo) != std::string::npos);
+    auto r = run({"busctl", "--address=" + bus.address(), "status", kFdo});
+    CHECK_EQ(r.exit_code, 0);
+    r = run({"busctl", "--address=" + bus.address(), "get-property", kFdo, "/StatusNotifierWatcher", kFdo,
+             "ProtocolVersion", "IsStatusNotifierHostRegistered"});
+    CHECK_EQ(trim(r.out), std::string("i 0\nb true"));
+
+    ItemProc item = ItemProc::start(bus, "name", true, {"--flavor", "freedesktop"});
+    REQUIRE(item.ok());
+    auto added = log.wait<TrayItemAdded>([&](const TrayItemAdded& e) { return e.item.id == item.id; }, 10000ms);
+    REQUIRE(added.has_value());
+    check_item_properties(added->item, item);
+    CHECK(sig.wait([&](const dbus::Message& m) {
+        return m.member == "StatusNotifierItemRegistered" && !m.args.empty() && m.args[0].as_string() == item.id;
+    }) >= 0);
+    // The same registry seen through either interface.
+    r = run({"busctl", "--address=" + bus.address(), "get-property", kFdo, "/StatusNotifierWatcher", kFdo,
+             "RegisteredStatusNotifierItems"});
+    CHECK(r.out.find("\"" + item.id + "\"") != std::string::npos);
+    CHECK(registered_items_contain(bus, item.id));
+    // Its New* signals and calls go through the freedesktop item interface.
+    Control ctl(bus);
+    REQUIRE(ctl.conn);
+    CHECK(ctl.call(item, "SetTitle", {Value::str("fdo title")}));
+    auto c = log.wait<TrayItemChanged>(changed(item.id));
+    CHECK(c && c->changes == tray_change::Title && c->item.title == "fdo title");
+    CHECK(host->activate(item.id, 5, 6).ok);
+    CHECK(item.proc->wait_for_line("ACTIVATE 5 6", 5000ms));
+    CHECK(host->menu_event(item.id, 1, MenuEventType::Clicked).ok);
+    CHECK(item.proc->wait_for_line("EVENT 1 clicked", 5000ms));
+
+    // An org.kde-flavoured item registering through the freedesktop
+    // interface: the other item interface is found by probing.
+    ItemProc mixed = ItemProc::start(bus, "path", true, {"--watcher", "freedesktop"});
+    REQUIRE(mixed.ok());
+    added = log.wait<TrayItemAdded>([&](const TrayItemAdded& e) { return e.item.id == mixed.id; }, 10000ms);
+    REQUIRE(added.has_value());
+    check_item_properties(added->item, mixed);
+    CHECK(host->context_menu(mixed.id, 1, 1).ok);
+    CHECK(mixed.proc->wait_for_line("CONTEXT 1 1", 5000ms));
+    mixed.proc->stop();
+    CHECK(log.wait<TrayItemRemoved>([&](const TrayItemRemoved& e) { return e.id == mixed.id; }).has_value());
+    r = run({"busctl", "--address=" + bus.address(), "call", kFdo, "/StatusNotifierWatcher", kFdo,
+             "RegisterStatusNotifierItem", "s", item.id});  // already registered: accepted, no duplicate
+    CHECK_EQ(r.exit_code, 0);
+    CHECK_EQ(host->items().size(), size_t(1));
 }
 
 // ---------------------------------------------------------------- WatcherClient role
@@ -391,6 +487,70 @@ void test_disconnect() {
     CHECK(!host->activate(item.id, 0, 0).ok);
 }
 
+// The session bus daemon restarts (same address; every connection drops and
+// every name is released). The host reports the loss and its items go,
+// reconnects, owns the watcher names again, and the items, which
+// re-register by themselves as real ones do, come back: one under its new
+// unique name, one under its well-known name. Then a passive host follows
+// another brosys process's watcher across a restart.
+void test_bus_restart() {
+    bstest::PrivateBus bus;
+    REQUIRE(bus.ok());
+    auto host = make_host(bus);
+    REQUIRE(host);
+    Log log(host->events());
+    auto is_watcher = [](const TrayHostStatus& s) { return s.role == TrayRole::Watcher; };
+    REQUIRE(log.wait<TrayHostStatus>(is_watcher).has_value());
+    ItemProc by_path = ItemProc::start(bus, "path");
+    ItemProc by_name = ItemProc::start(bus, "name");
+    REQUIRE(by_path.ok() && by_name.ok());
+    for (auto* it : {&by_path, &by_name})
+        CHECK(log.wait<TrayItemAdded>([&](const TrayItemAdded& e) { return e.item.id == it->id; }, 10000ms));
+
+    REQUIRE(bus.restart());
+    auto st = log.wait<TrayHostStatus>([](const TrayHostStatus& s) { return s.role == TrayRole::None; }, 5000ms);
+    CHECK(st && st->detail.find("lost") != std::string::npos);
+    for (auto* it : {&by_path, &by_name})
+        CHECK(log.wait<TrayItemRemoved>([&](const TrayItemRemoved& e) { return e.id == it->id; }));
+    CHECK(log.wait<TrayHostStatus>(is_watcher, 10000ms).has_value());
+    CHECK_EQ(run({"busctl", "--address=" + bus.address(), "status", kWatcher}).exit_code, 0);
+    CHECK_EQ(run({"busctl", "--address=" + bus.address(), "status", "org.freedesktop.StatusNotifierWatcher"}).exit_code,
+             0);
+    std::string line, tag, unique, new_id;
+    REQUIRE(by_path.proc->wait_for_line("RECONNECTED ", 10000ms, &line));
+    std::istringstream in(line);
+    in >> tag >> unique >> new_id;
+    CHECK_EQ(new_id, unique + "/org/brosys/Item");  // (a new daemon numbers from :1.0: it may repeat the old id)
+    CHECK(log.wait<TrayItemAdded>([&](const TrayItemAdded& e) { return e.item.id == new_id; }, 10000ms));
+    CHECK(log.wait<TrayItemAdded>([&](const TrayItemAdded& e) { return e.item.id == by_name.id; }, 10000ms));
+    CHECK(registered_items_contain(bus, new_id));
+    CHECK(registered_items_contain(bus, by_name.id));
+    CHECK_EQ(host->items().size(), size_t(2));
+    CHECK(host->activate(new_id, 1, 2).ok);
+    CHECK(by_path.proc->wait_for_line("ACTIVATE 1 2", 5000ms));
+    CHECK(host->activate(by_name.id, 3, 4).ok);
+    CHECK(by_name.proc->wait_for_line("ACTIVATE 3 4", 5000ms));
+
+    // Passive: another process owns the watcher; we follow it across a restart.
+    host.reset();
+    bstest::Daemon other({BROSYS_TRAY_HOST, "--bus", bus.address()});
+    REQUIRE(other.wait_for_line("ROLE watcher", 10000ms));
+    auto passive = make_host(bus, false);
+    REQUIRE(passive);
+    Log plog(passive->events());
+    auto is_client = [](const TrayHostStatus& s) { return s.role == TrayRole::WatcherClient; };
+    CHECK(plog.wait<TrayHostStatus>(is_client, 10000ms).has_value());
+    CHECK(plog.wait<TrayItemAdded>([&](const TrayItemAdded& e) { return e.item.id == by_name.id; }, 10000ms));
+    REQUIRE(bus.restart());
+    CHECK(plog.wait<TrayHostStatus>([](const TrayHostStatus& s) { return s.role == TrayRole::None; }, 5000ms));
+    CHECK(plog.wait<TrayItemRemoved>([&](const TrayItemRemoved& e) { return e.id == by_name.id; }));
+    CHECK(other.wait_for_line("ROLE watcher", 10000ms));  // the other process took its role up again
+    CHECK(plog.wait<TrayHostStatus>(is_client, 10000ms).has_value());
+    CHECK(plog.wait<TrayItemAdded>([&](const TrayItemAdded& e) { return e.item.id == by_name.id; }, 10000ms));
+    CHECK(passive->activate(by_name.id, 5, 6).ok);
+    CHECK(by_name.proc->wait_for_line("ACTIVATE 5 6", 5000ms));
+}
+
 }  // namespace
 
 int main() {
@@ -410,6 +570,11 @@ int main() {
         bstest::PrivateBus bus;
         test_client_role(bus);
     }
+    {
+        bstest::PrivateBus bus;
+        test_freedesktop_flavor(bus);
+    }
     test_disconnect();
+    test_bus_restart();
     return bstest::finish("test_tray_sni");
 }

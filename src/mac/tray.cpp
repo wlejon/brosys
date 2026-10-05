@@ -32,9 +32,12 @@ public:
     Result secondary_activate(const std::string&, int32_t, int32_t) override { return none(); }
     Result context_menu(const std::string&, int32_t, int32_t) override { return none(); }
     Result scroll(const std::string&, int32_t, ScrollOrientation) override { return none(); }
+    Result double_click(const std::string&, int32_t, int32_t) override { return none(); }
+    Result keyboard_select(const std::string&, int32_t, int32_t) override { return none(); }
+    Result hover(const std::string&, int32_t, int32_t, HoverPhase) override { return none(); }
     std::optional<MenuItem> menu(const std::string&) const override { return std::nullopt; }
     Result menu_about_to_show(const std::string&, int32_t) override { return none(); }
-    Result menu_event(const std::string&, int32_t, MenuEventType) override { return none(); }
+    Result menu_event(const std::string&, int32_t, MenuEventType, const MenuEventData&) override { return none(); }
     Result set_item_rect(const std::string&, const Rect32&) override { return none(); }
 
 private:

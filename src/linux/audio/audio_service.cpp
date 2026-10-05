@@ -8,6 +8,10 @@
 // Changes signal a loop event; its handler (once per loop iteration) builds
 // an AudioState, diffs it against the last published one and queues the
 // events. Mutations take the loop lock and set params the way wpctl does.
+//
+// When the server goes away every device is removed; a loop timer then
+// reconnects (50 ms doubling to 2 s) to the same remote, and the registry
+// fills the graph again, reported as ordinary additions.
 #include "brosys/audio.h"
 #include "linux/audio/pw_model.h"
 #include "linux/audio/pw_pod.h"
@@ -89,9 +93,14 @@ public:
     void on_done(uint32_t id, int seq);
     void on_error(uint32_t id, int res, const char* message);
     void on_publish();
+    void on_reconnect_timer();
 
 private:
     void shutdown();
+    // Loop lock held. connect_core: core + registry + listeners ("" or why not).
+    std::string connect_core();
+    void disconnect_core();
+    void arm_reconnect(std::chrono::milliseconds delay);
     void bind(uint32_t id, Kind kind, const char* type, uint32_t version, const pw::Dict& props);
     void destroy_bound(Bound& b);
     void settle_later(Bound* b);
@@ -114,6 +123,8 @@ private:
     spa_hook core_hook_{};
     spa_hook registry_hook_{};
     spa_source* publish_event_ = nullptr;
+    spa_source* reconnect_timer_ = nullptr;
+    std::chrono::milliseconds reconnect_delay_{50};
     std::map<uint32_t, std::unique_ptr<Bound>> bound_;
     pw::Graph graph_;
     AudioState published_;
@@ -185,6 +196,7 @@ const pw_core_events kCoreEvents = {
 };
 
 void publish_event(void* data, uint64_t) { static_cast<LinuxAudioService*>(data)->on_publish(); }
+void reconnect_timer(void* data, uint64_t) { static_cast<LinuxAudioService*>(data)->on_reconnect_timer(); }
 
 // ---------------------------------------------------------------- lifecycle
 
@@ -216,23 +228,14 @@ bool LinuxAudioService::start(const AudioConfig& config, std::string* error) {
         if (error) *error = std::string("pw_context_new: ") + std::strerror(errno);
         return false;
     }
-    pw_properties* props = pw_properties_new(PW_KEY_APP_NAME, "brosys", nullptr);
-    if (!config.pipewire_remote.empty()) pw_properties_set(props, PW_KEY_REMOTE_NAME, config.pipewire_remote.c_str());
-    core_ = pw_context_connect(context_, props, 0);
-    if (!core_) {
-        int e = errno;
+    publish_event_ = pw_loop_add_event(pw_thread_loop_get_loop(loop_), publish_event, this);
+    reconnect_timer_ = pw_loop_add_timer(pw_thread_loop_get_loop(loop_), reconnect_timer, this);
+    std::string why = connect_core();
+    if (!why.empty()) {
         pw_thread_loop_unlock(loop_);
-        if (error)
-            *error = "cannot connect to PipeWire" +
-                     (config.pipewire_remote.empty() ? std::string() : " remote '" + config.pipewire_remote + "'") +
-                     ": " + std::strerror(e);
+        if (error) *error = why;
         return false;
     }
-    connected_ = true;
-    pw_core_add_listener(core_, &core_hook_, &kCoreEvents, this);
-    registry_ = pw_core_get_registry(core_, PW_VERSION_REGISTRY, 0);
-    pw_registry_add_listener(registry_, &registry_hook_, &kRegistryEvents, this);
-    publish_event_ = pw_loop_add_event(pw_thread_loop_get_loop(loop_), publish_event, this);
     initial_seq_ = pw_core_sync(core_, PW_ID_CORE, 0);
 
     auto deadline = std::chrono::steady_clock::now() + kInitialTimeout;
@@ -255,9 +258,24 @@ bool LinuxAudioService::start(const AudioConfig& config, std::string* error) {
     return true;
 }
 
-void LinuxAudioService::shutdown() {
-    if (!loop_) return;
-    pw_thread_loop_lock(loop_);
+std::string LinuxAudioService::connect_core() {
+    pw_properties* props = pw_properties_new(PW_KEY_APP_NAME, "brosys", nullptr);
+    if (!config_.pipewire_remote.empty()) pw_properties_set(props, PW_KEY_REMOTE_NAME, config_.pipewire_remote.c_str());
+    core_ = pw_context_connect(context_, props, 0);
+    if (!core_) {
+        int e = errno;
+        return "cannot connect to PipeWire" +
+               (config_.pipewire_remote.empty() ? std::string() : " remote '" + config_.pipewire_remote + "'") + ": " +
+               std::strerror(e);
+    }
+    connected_ = true;
+    pw_core_add_listener(core_, &core_hook_, &kCoreEvents, this);
+    registry_ = pw_core_get_registry(core_, PW_VERSION_REGISTRY, 0);
+    pw_registry_add_listener(registry_, &registry_hook_, &kRegistryEvents, this);
+    return {};
+}
+
+void LinuxAudioService::disconnect_core() {
     for (auto& [id, b] : bound_) destroy_bound(*b);
     bound_.clear();
     if (registry_) {
@@ -269,6 +287,39 @@ void LinuxAudioService::shutdown() {
         spa_hook_remove(&core_hook_);
         pw_core_disconnect(core_);
         core_ = nullptr;
+    }
+    connected_ = false;
+}
+
+void LinuxAudioService::arm_reconnect(std::chrono::milliseconds delay) {
+    if (!reconnect_timer_) return;
+    timespec ts{};
+    ts.tv_sec = static_cast<time_t>(delay.count() / 1000);
+    ts.tv_nsec = static_cast<long>((delay.count() % 1000) * 1000000);
+    pw_loop_update_timer(pw_thread_loop_get_loop(loop_), reconnect_timer_, &ts, nullptr, false);
+}
+
+// Loop thread: the old connection is torn down (outside its own callbacks)
+// and a new one tried; the registry repopulates the graph from scratch.
+void LinuxAudioService::on_reconnect_timer() {
+    if (connected_) return;
+    disconnect_core();
+    if (!connect_core().empty()) {
+        reconnect_delay_ = std::min(reconnect_delay_ * 2, std::chrono::milliseconds(2000));
+        arm_reconnect(reconnect_delay_);
+        return;
+    }
+    reconnect_delay_ = std::chrono::milliseconds(50);
+    pw_core_sync(core_, PW_ID_CORE, 0);
+}
+
+void LinuxAudioService::shutdown() {
+    if (!loop_) return;
+    pw_thread_loop_lock(loop_);
+    disconnect_core();
+    if (reconnect_timer_) {
+        pw_loop_destroy_source(pw_thread_loop_get_loop(loop_), reconnect_timer_);
+        reconnect_timer_ = nullptr;
     }
     if (publish_event_) {
         pw_loop_destroy_source(pw_thread_loop_get_loop(loop_), publish_event_);
@@ -461,11 +512,12 @@ void LinuxAudioService::on_error(uint32_t id, int res, const char* message) {
         pw_thread_loop_signal(loop_, false);
         return;
     }
-    // The server went away: everything is gone.
-    for (auto& [bid, b] : bound_) destroy_bound(*b);
-    bound_.clear();
+    // The server went away: everything is gone until it is back. The proxies
+    // are released from the reconnect timer, not inside the core's own callback.
     graph_ = pw::Graph();
     schedule_publish();
+    reconnect_delay_ = std::chrono::milliseconds(50);
+    arm_reconnect(reconnect_delay_);
 }
 
 void LinuxAudioService::check_initial() {
