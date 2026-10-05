@@ -54,8 +54,17 @@ public:
         // is back the same resync reloads both daemons.
         conn_->set_disconnect_handler([this] { resync(); });
         conn_->set_reconnect_handler([this] { resync(); });
+
+        if (config.export_screensaver) {
+            ScreenSaverConfig ss_cfg;
+            ss_cfg.session_bus_address = config.session_bus_address;
+            ss_cfg.system_bus_address = config.system_bus_address;
+            screensaver_ = ScreenSaverServer::create(ss_cfg, nullptr);
+        }
         return true;
     }
+
+    ScreenSaverServer* screensaver() const override { return screensaver_.get(); }
 
     PowerEventQueue& events() override { return queue_; }
 
@@ -309,6 +318,7 @@ private:
     std::string session_path_;
     bool publish_scheduled_ = false;
 
+    std::unique_ptr<ScreenSaverServer> screensaver_;
     std::unique_ptr<dbus::Connection> conn_;  // last: destroyed (thread joined) first
 };
 

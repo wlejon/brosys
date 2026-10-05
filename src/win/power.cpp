@@ -434,4 +434,9 @@ std::unique_ptr<PowerService> PowerService::create(const PowerConfig& config, st
     return s;
 }
 
+std::unique_ptr<ScreenSaverServer> ScreenSaverServer::create(const ScreenSaverConfig&, std::string* error) {
+    if (error) *error = "ScreenSaverServer is unsupported on Windows";
+    return nullptr;
+}
+
 }  // namespace brosys

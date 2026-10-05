@@ -150,10 +150,32 @@ struct ShutdownPrepare {
 using PowerEvent = std::variant<PowerChanged, PowerCapabilitiesChanged, SleepPrepare, ShutdownPrepare>;
 using PowerEventQueue = MessageQueue<PowerEvent>;
 
+struct ScreenSaverConfig {
+    // Session bus address for exporting org.freedesktop.ScreenSaver (empty = default session bus)
+    std::string session_bus_address;
+    // System bus address for talking to logind (empty = default system bus)
+    std::string system_bus_address;
+    bool replace_existing = true;
+};
+
+class ScreenSaverServer {
+public:
+    static std::unique_ptr<ScreenSaverServer> create(const ScreenSaverConfig& config, std::string* error);
+    virtual ~ScreenSaverServer() = default;
+
+    virtual uint32_t active_inhibitions() const = 0;
+    virtual bool is_active() const = 0;
+    virtual void set_active(bool active) = 0;
+    virtual Result simulate_user_activity() = 0;
+};
+
 struct PowerConfig {
     // Linux: system-bus address override (tests point it at a private bus
     // running a real upowerd); empty = the default system bus.
     std::string system_bus_address;
+    // Session-bus address override for exporting org.freedesktop.ScreenSaver
+    std::string session_bus_address;
+    bool export_screensaver = false;
     // Polling interval for backends that have no change notification for a
     // value (Windows battery rate / time estimates). 0 disables polling.
     uint32_t poll_interval_ms = 10000;
@@ -179,6 +201,9 @@ public:
     virtual Result request(PowerAction action) = 0;
 
     virtual std::unique_ptr<Inhibitor> inhibit(const InhibitRequest& request, std::string* error) = 0;
+
+    // The screensaver / idle inhibit provider when export_screensaver was enabled.
+    virtual ScreenSaverServer* screensaver() const { return nullptr; }
 };
 
 const char* to_string(PowerSource s);
