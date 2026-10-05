@@ -36,13 +36,13 @@ include/brosys/
 
 ## Backends
 
-| Service | Linux | Windows |
-|---------|-------|---------|
-| Power | UPower (real devices only: no DisplayDevice, no line power, `IsPresent`), logind (CanX, actions, Inhibit fds, PrepareForSleep/Shutdown) | GetSystemPowerStatus + battery device class IOCTLs, powrprof capabilities, privilege and policy checks, power requests, shutdown block reasons, power broadcasts |
-| Audio | PipeWire client (nodes, device routes, `default` metadata, the way wpctl sets them) | Core Audio (IMMNotificationClient, per-endpoint volume callbacks; IPolicyConfig for set_default) |
-| Network | NetworkManager (devices, IP configs, active connections, primary, LastScan-tracked scans) | IP Helper (adapters, primary from default routes + interface metrics, change notifications), connectivity hint / NLM, WLAN API (BSS list, IE-parsed security, scan completion) |
-| Notifications | `org.freedesktop.Notifications`, spec 1.2 | shell mode: tray balloons (NIF_INFO) as notifications; alongside Explorer: local only |
-| Tray | StatusNotifierWatcher + host, dbusmenu as data; WatcherClient role beside another watcher | shell mode: owns `Shell_TrayWnd` on its desktop (WM_COPYDATA NIM_*); alongside Explorer: role None |
+| Service | Linux | Windows | macOS |
+|---------|-------|---------|-------|
+| Power | UPower (real devices only: no DisplayDevice, no line power, `IsPresent`), logind (CanX, actions, Inhibit fds, PrepareForSleep/Shutdown) | GetSystemPowerStatus + battery device class IOCTLs, powrprof capabilities, privilege and policy checks, power requests, shutdown block reasons, power broadcasts | IOKit power sources + AppleSmartBattery, clamshell, IORegisterForSystemPower (Delay inhibitors hold the will-sleep ack), IOPM assertions; reboot/power off via loginwindow AppleEvents (NeedsAuth until Automation consent); no hibernate, no shutdown inhibitors |
+| Audio | PipeWire client (nodes, device routes, `default` metadata, the way wpctl sets them) | Core Audio (IMMNotificationClient, per-endpoint volume callbacks; IPolicyConfig for set_default) | CoreAudio HAL (property listener blocks, virtual main volume, `out:`/`in:` + device UID ids) |
+| Network | NetworkManager (devices, IP configs, active connections, primary, LastScan-tracked scans) | IP Helper (adapters, primary from default routes + interface metrics, change notifications), connectivity hint / NLM, WLAN API (BSS list, IE-parsed security, scan completion) | SystemConfiguration (current set's services, dynamic store, primary) + getifaddrs, Network.framework path monitor, CoreWLAN (SSID/BSSID need Location permission) |
+| Notifications | `org.freedesktop.Notifications`, spec 1.2 | shell mode: tray balloons (NIF_INFO) as notifications; alongside Explorer: local only | local only (Notification Center has no server role) |
+| Tray | StatusNotifierWatcher + host, dbusmenu as data; WatcherClient role beside another watcher | shell mode: owns `Shell_TrayWnd` on its desktop (WM_COPYDATA NIM_*); alongside Explorer: role None | role None (menu-bar extras cannot be hosted by another process) |
 
 Linux D-Bus goes through `src/linux/dbus/` (sd-bus): one `Connection` per
 role with its own thread, `Value` for any D-Bus value, blocking, async and
@@ -54,6 +54,15 @@ the shell. `TrayMode::Auto` takes the shell role only when no
 `Shell_TrayWnd` exists on the calling thread's desktop. `capabilities()` and
 `status()` report which role applies. Toasts are not interceptable without
 package identity.
+
+macOS has neither role to take, so it reports both honestly instead of
+faking them. Nor does brosys post to Notification Center or create an
+NSStatusItem of its own. The host renders the notifications it posts, so
+forwarding them would show each one twice, and UNUserNotificationCenter
+needs an app bundle plus user authorization. A status item of the host's
+own is a tray *client*, which bro gets from SDL3 (`SDL_CreateTray`) on the
+main thread AppKit requires. Objective-C++ is confined to `src/mac/*.mm`
+(CoreWLAN, Network.framework, NSWorkspace) behind C++ headers.
 
 ## Building
 
@@ -72,6 +81,14 @@ sudo apt install libsystemd-dev libpipewire-0.3-dev    # PipeWire optional: BROS
 # test oracles (missing ones skip with a reason):
 sudo apt install dbus-daemon libnotify-bin libglib2.0-bin umockdev libumockdev-dev upower \
     pipewire wireplumber pipewire-pulse network-manager libayatana-appindicator3-dev xvfb
+cmake -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build-release
+ctest --test-dir build-release --output-on-failure
+```
+
+macOS (Apple clang, macOS 13+; Ninja from Homebrew):
+
+```bash
+brew install ninja switchaudio-osx    # SwitchAudioSource: test_mac_audio's oracle (skips without it)
 cmake -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build-release
 ctest --test-dir build-release --output-on-failure
 ```
@@ -110,6 +127,15 @@ Windows:
 | test_win_notify_balloons | balloons from that client, with the NIN_BALLOON* replies it receives |
 | test_win_shell_alongside | the real Explorer, read-only (Auto resolves to None, nothing created) |
 | test_win_tray_wire | wire layouts, icon conversion, balloon mapping |
+
+macOS. Everything here is read-only; the only writes are same-value ones:
+
+| Test | Oracle |
+|------|--------|
+| test_mac_power | `pmset -g batt`, ioreg AppleClamshellState, `pmset -g` + the console user, `pmset -g assertions` for inhibitors; the will-sleep / Delay handshake through a test seam with synthetic IOKit messages |
+| test_mac_audio | `SwitchAudioSource -a/-c -f json`, osascript `get volume settings`, `system_profiler SPAudioDataType`; Added/Removed via a private aggregate device only this process sees |
+| test_mac_network | `scutil --nwi`, scutil Global IPv4 / DNS, `networksetup -listallhardwareports` / `-listnetworkserviceorder` / `-getairportpower`, ifconfig, `scutil -r` |
+| test_mac_shell | tray role None in every mode, local-only notifications fully working |
 
 Isolating the shell-mode tray: `Shell_NotifyIcon` finds the tray per
 desktop. The tests therefore create a private desktop, run the host's thread

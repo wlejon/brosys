@@ -10,6 +10,7 @@ project(brosys VERSION 0.2.0 LANGUAGES CXX)
 #   src/win            Windows backends
 #   src/linux/dbus     the sd-bus layer (connections, values, object export)
 #   src/linux/<svc>    Linux backends (notify, tray, power, network, audio)
+#   src/mac            macOS backends (IOKit, CoreAudio, SystemConfiguration, CoreWLAN)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -71,8 +72,17 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     else()
         list(APPEND BROSYS_SOURCES src/linux/audio_unavailable.cpp)
     endif()
+elseif(APPLE)
+    # Objective-C++ is confined to the few .mm files that need Cocoa-only APIs
+    # (CoreWLAN, NSWorkspace, Network.framework path monitoring).
+    enable_language(OBJCXX)
+    set(CMAKE_OBJCXX_STANDARD 20)
+    set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+    find_package(Threads REQUIRED)
+    file(GLOB _mac_sources CONFIGURE_DEPENDS src/mac/*.cpp src/mac/*.mm)
+    list(APPEND BROSYS_SOURCES ${_mac_sources})
 else()
-    message(FATAL_ERROR "brosys implements Windows and Linux backends only")
+    message(FATAL_ERROR "brosys implements Windows, Linux and macOS backends only")
 endif()
 
 add_library(brosys STATIC ${BROSYS_SOURCES})
@@ -90,6 +100,12 @@ if(WIN32)
     target_link_libraries(brosys PRIVATE
         user32 gdi32 shell32 ole32 oleaut32 advapi32 powrprof setupapi
         iphlpapi ws2_32 wlanapi uuid)
+elseif(APPLE)
+    target_compile_options(brosys PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+    target_link_libraries(brosys PUBLIC Threads::Threads PRIVATE
+        "-framework CoreFoundation" "-framework Foundation" "-framework IOKit" "-framework CoreAudio"
+        "-framework AudioToolbox" "-framework CoreServices" "-framework SystemConfiguration"
+        "-framework CoreWLAN" "-framework Network" "-framework AppKit")
 else()
     target_link_libraries(brosys PRIVATE PkgConfig::BROSYS_SDBUS PUBLIC Threads::Threads)
     if(BROSYS_WITH_PIPEWIRE)

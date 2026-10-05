@@ -12,6 +12,8 @@
 // (NIN_BALLOONUSERCLICK / NIN_BALLOONTIMEOUT / NIN_BALLOONHIDE). Alongside
 // Explorer only notifications the host posts itself are seen;
 // capabilities() says which.
+// macOS: local only. Other applications' notifications go to Notification
+// Center, which has no server role and no API to receive them.
 #pragma once
 
 #include "brosys/common.h"

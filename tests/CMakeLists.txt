@@ -21,9 +21,11 @@ brosys_test(test_event_queue SOURCES common/test_event_queue.cpp)
 # Per-area fragments (each owns its own tests and helper executables).
 foreach(fragment
         win/system.cmake win/shell.cmake
-        linux/dbus.cmake linux/desktop.cmake linux/system.cmake)
+        linux/dbus.cmake linux/desktop.cmake linux/system.cmake
+        mac/system.cmake)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${fragment})
-        if((fragment MATCHES "^win/" AND WIN32) OR (fragment MATCHES "^linux/" AND CMAKE_SYSTEM_NAME STREQUAL "Linux"))
+        if((fragment MATCHES "^win/" AND WIN32) OR (fragment MATCHES "^linux/" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+           OR (fragment MATCHES "^mac/" AND APPLE))
             include(${CMAKE_CURRENT_SOURCE_DIR}/${fragment})
         endif()
     endif()

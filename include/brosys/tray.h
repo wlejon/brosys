@@ -12,6 +12,9 @@
 // shell mode this host creates it on its own thread's desktop and receives
 // every NIM_* call; alongside Explorer that window belongs to Explorer and
 // nothing can be hosted (role None, reason in capabilities()).
+// macOS: role None in every mode. Menu-bar extras are NSStatusItems each
+// application draws into the menu bar itself; no process can host another's.
+// TrayMode::Shell fails.
 #pragma once
 
 #include "brosys/common.h"

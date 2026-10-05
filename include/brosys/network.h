@@ -10,6 +10,14 @@
 // NotifyUnicastIpAddressChange / NotifyNetworkConnectivityHintChange, and
 // the WLAN API (BSS list for BSSID / channel / RSSI; scan completion via
 // WlanRegisterNotification).
+// macOS: SystemConfiguration (the current set's services, SCDynamicStore
+// State:/Network keys, the primary service) + getifaddrs, Network.framework's
+// default path for connectivity (satisfied = Full: it does not probe for
+// captive portals, so Portal / Limited are never reported), and CoreWLAN.
+// Device ids are BSD names ("en0"); active connections are network services
+// (id and uuid = service ID); `managed` = an enabled, visible service. SSID
+// and BSSID are empty unless the process has Location Services permission
+// (macOS 14+), and a scan request fails while the radio is off.
 #pragma once
 
 #include "brosys/common.h"

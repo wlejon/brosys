@@ -6,6 +6,16 @@
 // inhibitors / PrepareForSleep / PrepareForShutdown), on the system bus.
 // Windows: GetSystemPowerStatus + the battery device class (IOCTL_BATTERY_*),
 // powrprof capabilities, power requests, and power broadcasts.
+// macOS: IOKit power sources (IOPS + AppleSmartBattery; device ids
+// "iops:<PowerSourceID>"), the clamshell, IORegisterForSystemPower
+// (SleepPrepare; a Delay inhibitor holds the will-sleep acknowledgement,
+// which the kernel waits for about 30 s), IOPM assertions for Block
+// inhibitors. Hibernate / HybridSleep are No (hibernatemode only chooses
+// what sleep writes); reboot / power off go to loginwindow by AppleEvent
+// and report NeedsAuth until the user grants Automation consent; Shutdown
+// inhibitors are refused (only a GUI app's applicationShouldTerminate: can
+// delay logout); ShutdownPrepare comes from NSWorkspace, which posts it to
+// GUI applications only.
 #pragma once
 
 #include "brosys/common.h"

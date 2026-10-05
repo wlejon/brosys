@@ -5,6 +5,10 @@
 // metadata, device Route volumes the way wpctl / pactl set them).
 // Windows: Core Audio (IMMDeviceEnumerator, IMMNotificationClient,
 // IAudioEndpointVolume + IAudioEndpointVolumeCallback).
+// macOS: the CoreAudio HAL with property listeners. A device appears once per
+// direction it has streams for, with id "out:<UID>" / "in:<UID>"; volume is
+// the virtual main volume (the Sound menu's slider), clamped to 1.0; hidden
+// devices are left out.
 //
 // Volume is the value the OS mixer UI shows: the endpoint scalar on Windows,
 // the cubic ("wpctl" / pactl percent) volume on PipeWire. 1.0 is 100 %;
@@ -84,7 +88,7 @@ struct AudioConfig {
     // Linux: PipeWire remote name (PIPEWIRE_REMOTE semantics); empty = the
     // default ("pipewire-0" in $XDG_RUNTIME_DIR).
     std::string pipewire_remote;
-    float max_volume = 1.5f;  // clamp for set_volume (Windows always clamps to 1.0)
+    float max_volume = 1.5f;  // clamp for set_volume (Windows and macOS always clamp to 1.0)
 };
 
 class AudioService {
