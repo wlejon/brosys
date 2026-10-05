@@ -29,7 +29,8 @@ constexpr const char* kIface = "org.freedesktop.Notifications";
 
 class LinuxNotificationServer final : public NotificationServer {
 public:
-    explicit LinuxNotificationServer(const NotificationServerConfig& cfg) : cfg_(cfg) {}
+    explicit LinuxNotificationServer(const NotificationServerConfig& cfg)
+        : cfg_(cfg), dnd_(cfg.do_not_disturb) {}
     ~LinuxNotificationServer() override {
         stopping_ = true;
         if (conn_) conn_->shutdown();  // joins the bus thread before anything else goes away
@@ -40,6 +41,11 @@ public:
     NotificationEventQueue& events() override { return events_; }
     NotificationServerCapabilities capabilities() const override;
     std::vector<Notification> active() const override;
+    std::vector<Notification> history() const override;
+    void clear_history() override;
+    bool remove_from_history(uint32_t id) override;
+    void set_do_not_disturb(bool enabled) override;
+    bool is_do_not_disturb() const override;
     Result invoke_action(uint32_t id, const std::string& action_key, const std::string& activation_token) override;
     Result close(uint32_t id, CloseReason reason) override;
     uint32_t post(const Notification& notification) override;
@@ -70,6 +76,8 @@ private:
     std::map<uint32_t, Entry> entries_;          // guarded by mu_
     bool owned_ = false;                         // guarded by mu_
     std::string owner_detail_;                   // guarded by mu_
+    bool dnd_ = false;                           // guarded by mu_
+    std::vector<Notification> history_;          // guarded by mu_
 
     uint32_t next_id_ = 1;       // bus thread
     uint64_t next_generation_ = 1;  // bus thread
@@ -213,8 +221,10 @@ uint32_t LinuxNotificationServer::add(Notification n, uint32_t replaces_id) {
     uint64_t old_timer = 0;
     uint64_t generation = next_generation_++;
     Notification snapshot;
+    bool dnd = false;
     {
         std::lock_guard<std::mutex> lock(mu_);
+        dnd = dnd_;
         auto it = replaces_id ? entries_.find(replaces_id) : entries_.end();
         if (it != entries_.end()) {
             replaced = true;
@@ -228,9 +238,18 @@ uint32_t LinuxNotificationServer::add(Notification n, uint32_t replaces_id) {
         e.timer = 0;
         e.generation = generation;
         snapshot = e.n;
+
+        auto h_it = std::find_if(history_.begin(), history_.end(), [&](const Notification& item) {
+            return item.id == snapshot.id;
+        });
+        if (h_it != history_.end()) {
+            *h_it = snapshot;
+        } else {
+            history_.push_back(snapshot);
+        }
     }
     if (old_timer) conn_->cancel_timer(old_timer);
-    if (timeout > 0) {
+    if (!dnd && timeout > 0) {
         uint32_t id = snapshot.id;
         uint64_t timer = conn_->add_timer(std::chrono::milliseconds(timeout),
                                           [this, id, generation] { on_expired(id, generation); });
@@ -239,7 +258,7 @@ uint32_t LinuxNotificationServer::add(Notification n, uint32_t replaces_id) {
         if (it != entries_.end()) it->second.timer = timer;
     }
     uint32_t id = snapshot.id;
-    events_.push(NotificationPosted{std::move(snapshot), replaced});
+    events_.push(NotificationPosted{std::move(snapshot), replaced, dnd});
     return id;
 }
 
@@ -284,6 +303,45 @@ std::vector<Notification> LinuxNotificationServer::active() const {
     out.reserve(entries_.size());
     for (auto& [id, e] : entries_) out.push_back(e.n);
     return out;
+}
+
+std::vector<Notification> LinuxNotificationServer::history() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return history_;
+}
+
+void LinuxNotificationServer::clear_history() {
+    std::lock_guard<std::mutex> lock(mu_);
+    history_.clear();
+}
+
+bool LinuxNotificationServer::remove_from_history(uint32_t id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = std::find_if(history_.begin(), history_.end(), [id](const Notification& n) {
+        return n.id == id;
+    });
+    if (it == history_.end()) return false;
+    history_.erase(it);
+    return true;
+}
+
+void LinuxNotificationServer::set_do_not_disturb(bool enabled) {
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (dnd_ != enabled) {
+            dnd_ = enabled;
+            changed = true;
+        }
+    }
+    if (changed) {
+        events_.push(DoNotDisturbChanged{enabled});
+    }
+}
+
+bool LinuxNotificationServer::is_do_not_disturb() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return dnd_;
 }
 
 Result LinuxNotificationServer::invoke_action(uint32_t id, const std::string& action_key,

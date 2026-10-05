@@ -57,6 +57,43 @@ public:
         return out;
     }
 
+    std::vector<Notification> history() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return history_;
+    }
+
+    void clear_history() override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        history_.clear();
+    }
+
+    bool remove_from_history(uint32_t id) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(history_.begin(), history_.end(), [id](const Notification& n) {
+            return n.id == id;
+        });
+        if (it == history_.end()) return false;
+        history_.erase(it);
+        return true;
+    }
+
+    void set_do_not_disturb(bool enabled) override {
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (dnd_ != enabled) {
+                dnd_ = enabled;
+                changed = true;
+            }
+        }
+        if (changed) events_.push(DoNotDisturbChanged{enabled});
+    }
+
+    bool is_do_not_disturb() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return dnd_;
+    }
+
     Result invoke_action(uint32_t id, const std::string& key, const std::string&) override {
         bool resident = false;
         {
@@ -82,15 +119,22 @@ public:
         n.sender = "local";
         n.sender_pid = static_cast<uint32_t>(getpid());
         bool replaced = false;
+        bool dnd = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            dnd = dnd_;
             if (n.id && entries_.count(n.id)) replaced = true;
             else n.id = allocate_id();
             n.expires_at = expiry(n);
             entries_[n.id] = n;
+            auto h_it = std::find_if(history_.begin(), history_.end(), [&](const Notification& item) {
+                return item.id == n.id;
+            });
+            if (h_it != history_.end()) *h_it = n;
+            else history_.push_back(n);
         }
         cv_.notify_all();
-        events_.push(NotificationPosted{n, replaced});
+        events_.push(NotificationPosted{n, replaced, dnd});
         return n.id;
     }
 
@@ -155,6 +199,8 @@ private:
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::map<uint32_t, Notification> entries_;
+    std::vector<Notification> history_;
+    bool dnd_ = false;
     uint32_t next_id_ = 1;
     bool stop_ = false;
     std::thread timer_;

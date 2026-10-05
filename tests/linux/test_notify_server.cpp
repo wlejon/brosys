@@ -478,6 +478,112 @@ void test_bus_restart() {
     CHECK(std::any_of(act.begin(), act.end(), [](const Notification& n) { return n.summary == "before"; }));
 }
 
+void test_history_and_dnd(const bstest::PrivateBus& bus) {
+    NotificationServerConfig cfg;
+    cfg.default_timeout_ms = 0;
+    auto server = make_server(bus, cfg);
+    REQUIRE(server);
+    Log log(server->events());
+
+    // Initially history is empty and DND is off
+    CHECK(!server->is_do_not_disturb());
+    CHECK(server->history().empty());
+
+    // Post notification 1
+    Notification n1;
+    n1.app_name = "app1";
+    n1.summary = "Meeting reminder";
+    uint32_t id1 = server->post(n1);
+    CHECK(id1 != 0);
+
+    auto p1 = log.wait<NotificationPosted>([&](const NotificationPosted& e) { return e.notification.id == id1; });
+    REQUIRE(p1);
+    CHECK(!p1->popup_suppressed);
+
+    // Check history has notification 1
+    auto hist = server->history();
+    REQUIRE(hist.size() == 1);
+    CHECK_EQ(hist[0].id, id1);
+    CHECK_EQ(hist[0].summary, std::string("Meeting reminder"));
+
+    // Close notification 1
+    CHECK(server->close(id1, CloseReason::Dismissed).ok);
+    CHECK(server->active().empty());
+
+    // In history, notification 1 is retained!
+    hist = server->history();
+    REQUIRE(hist.size() == 1);
+    CHECK_EQ(hist[0].id, id1);
+
+    // Post notification 2 via foreign client (notify-send)
+    auto r = run({"notify-send", "-p", "Foreign alert"}, bus.env());
+    CHECK_EQ(r.exit_code, 0);
+    uint32_t id2 = parse_uint(r.out);
+    CHECK(id2 != 0);
+    auto p2 = log.wait<NotificationPosted>([&](const NotificationPosted& e) { return e.notification.id == id2; });
+    REQUIRE(p2);
+    CHECK(!p2->popup_suppressed);
+
+    hist = server->history();
+    REQUIRE(hist.size() == 2);
+
+    // Remove notification 1 from history
+    CHECK(server->remove_from_history(id1));
+    hist = server->history();
+    REQUIRE(hist.size() == 1);
+    CHECK_EQ(hist[0].id, id2);
+
+    // Remove non-existent ID
+    CHECK(!server->remove_from_history(999999));
+
+    // Clear history
+    server->clear_history();
+    CHECK(server->history().empty());
+
+    // Test Do-Not-Disturb (DND)
+    server->set_do_not_disturb(true);
+    auto dnd_ev1 = log.wait_any<DoNotDisturbChanged>();
+    REQUIRE(dnd_ev1);
+    CHECK(dnd_ev1->enabled);
+    CHECK(server->is_do_not_disturb());
+
+    // Post notification while DND is active
+    Notification n3;
+    n3.app_name = "app3";
+    n3.summary = "Quiet notification";
+    uint32_t id3 = server->post(n3);
+    CHECK(id3 != 0);
+
+    auto p3 = log.wait<NotificationPosted>([&](const NotificationPosted& e) { return e.notification.id == id3; });
+    REQUIRE(p3);
+    CHECK(p3->popup_suppressed);
+
+    // It is retained in history
+    hist = server->history();
+    REQUIRE(hist.size() == 1);
+    CHECK_EQ(hist[0].id, id3);
+    CHECK_EQ(hist[0].summary, std::string("Quiet notification"));
+
+    // Foreign notification under DND
+    r = run({"notify-send", "-p", "Foreign DND alert"}, bus.env());
+    CHECK_EQ(r.exit_code, 0);
+    uint32_t id4 = parse_uint(r.out);
+    CHECK(id4 != 0);
+    auto p4 = log.wait<NotificationPosted>([&](const NotificationPosted& e) { return e.notification.id == id4; });
+    REQUIRE(p4);
+    CHECK(p4->popup_suppressed);
+
+    hist = server->history();
+    REQUIRE(hist.size() == 2);
+
+    // Turn DND off
+    server->set_do_not_disturb(false);
+    auto dnd_ev2 = log.wait_any<DoNotDisturbChanged>();
+    REQUIRE(dnd_ev2);
+    CHECK(!dnd_ev2->enabled);
+    CHECK(!server->is_do_not_disturb());
+}
+
 }  // namespace
 
 int main() {
@@ -500,6 +606,7 @@ int main() {
     with_bus(test_actions);
     with_bus(test_gdbus);
     with_bus(test_post);
+    with_bus(test_history_and_dnd);
     test_names();
     test_bus_restart();
     return bstest::finish("test_notify_server");

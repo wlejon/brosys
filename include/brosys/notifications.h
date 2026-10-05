@@ -89,9 +89,11 @@ struct Notification {
 
 // A new notification, or `replaced` = an existing id was updated in place
 // (replaces_id / NIM_MODIFY); the host should update the existing popup.
+// When DND is active, popup_suppressed is true (popup presentation is suppressed).
 struct NotificationPosted {
     Notification notification;
     bool replaced = false;
+    bool popup_suppressed = false;
 };
 
 // The notification is gone, whoever closed it (sender, host, expiry).
@@ -107,7 +109,13 @@ struct NotificationServerStatus {
     std::string detail;
 };
 
-using NotificationEvent = std::variant<NotificationPosted, NotificationClosed, NotificationServerStatus>;
+// Do-Not-Disturb mode changed.
+struct DoNotDisturbChanged {
+    bool enabled = false;
+};
+
+using NotificationEvent =
+    std::variant<NotificationPosted, NotificationClosed, NotificationServerStatus, DoNotDisturbChanged>;
 using NotificationEventQueue = MessageQueue<NotificationEvent>;
 
 struct NotificationServerConfig {
@@ -122,6 +130,7 @@ struct NotificationServerConfig {
     bool replace_existing = false;
     std::string session_bus_address;   // Linux: override (tests use a private bus); empty = default
     TrayHost* balloon_source = nullptr; // Windows: balloons of this (shell-mode) tray host become notifications
+    bool do_not_disturb = false;        // initial Do-Not-Disturb state
 };
 
 struct NotificationServerCapabilities {
@@ -138,6 +147,15 @@ public:
     virtual NotificationEventQueue& events() = 0;
     virtual NotificationServerCapabilities capabilities() const = 0;
     virtual std::vector<Notification> active() const = 0;
+
+    // History: tracks posted and closed notifications.
+    virtual std::vector<Notification> history() const = 0;
+    virtual void clear_history() = 0;
+    virtual bool remove_from_history(uint32_t id) = 0;
+
+    // Do-Not-Disturb (DND): suppresses popup presentation while retaining notifications in history.
+    virtual void set_do_not_disturb(bool enabled) = 0;
+    virtual bool is_do_not_disturb() const = 0;
 
     // The user clicked an action (or "default"). Emits ActionInvoked (+
     // ActivationToken when given, before it); a non-resident notification is

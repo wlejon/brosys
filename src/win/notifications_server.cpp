@@ -105,6 +105,43 @@ public:
         return out;
     }
 
+    std::vector<Notification> history() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return history_;
+    }
+
+    void clear_history() override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        history_.clear();
+    }
+
+    bool remove_from_history(uint32_t id) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(history_.begin(), history_.end(), [id](const Notification& n) {
+            return n.id == id;
+        });
+        if (it == history_.end()) return false;
+        history_.erase(it);
+        return true;
+    }
+
+    void set_do_not_disturb(bool enabled) override {
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (dnd_ != enabled) {
+                dnd_ = enabled;
+                changed = true;
+            }
+        }
+        if (changed) events_.push(DoNotDisturbChanged{enabled});
+    }
+
+    bool is_do_not_disturb() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return dnd_;
+    }
+
     Result invoke_action(uint32_t id, const std::string& key, const std::string&) override {
         Entry e;
         {
@@ -140,8 +177,10 @@ public:
         n.sender = "local";
         n.sender_pid = GetCurrentProcessId();
         bool replaced = false;
+        bool dnd = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            dnd = dnd_;
             auto it = n.id ? entries_.find(n.id) : entries_.end();
             if (it != entries_.end() && !it->second.balloon) {
                 replaced = true;
@@ -152,9 +191,15 @@ public:
             Entry& e = entries_[n.id];
             e = Entry{};
             e.n = n;
+
+            auto h_it = std::find_if(history_.begin(), history_.end(), [&](const Notification& item) {
+                return item.id == n.id;
+            });
+            if (h_it != history_.end()) *h_it = n;
+            else history_.push_back(n);
         }
         cv_.notify_all();
-        events_.push(NotificationPosted{n, replaced});
+        events_.push(NotificationPosted{n, replaced, dnd});
         return n.id;
     }
 
@@ -162,8 +207,10 @@ public:
     void balloon_shown(const tray::BalloonData& b) override {
         Notification n = balloon_notification(b);
         bool replaced = false;
+        bool dnd = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            dnd = dnd_;
             auto it = std::find_if(entries_.begin(), entries_.end(), [&](const auto& kv) {
                 return kv.second.balloon && kv.second.item_id == b.item_id;
             });
@@ -179,9 +226,15 @@ public:
             e.balloon = true;
             e.item_id = b.item_id;
             e.target = b.target;
+
+            auto h_it = std::find_if(history_.begin(), history_.end(), [&](const Notification& item) {
+                return item.id == n.id;
+            });
+            if (h_it != history_.end()) *h_it = n;
+            else history_.push_back(n);
         }
         cv_.notify_all();
-        events_.push(NotificationPosted{n, replaced});
+        events_.push(NotificationPosted{n, replaced, dnd});
         tray::post_callback(b.target, NIN_BALLOONSHOW, 0, 0);
     }
 
@@ -295,6 +348,8 @@ private:
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::map<uint32_t, Entry> entries_;
+    std::vector<Notification> history_;
+    bool dnd_ = false;
     uint32_t next_id_ = 1;
     bool stop_ = false;
     NotificationServerCapabilities caps_;
