@@ -73,7 +73,7 @@ void test_notify_send(const bstest::PrivateBus& bus) {
     CHECK(server->capabilities().receives_foreign);
     CHECK_EQ(server->capabilities().source, std::string(kDest));
 
-    auto r = run({"notify-send", "-p", "-a", "Mail App", "-i", "mail-unread", "-u", "critical", "-c", "email.arrived",
+    auto r = run({"notify-send", "-p", "-a", "Mail App", "-i", "mail-unread", "-n", "mail-unread", "-u", "critical", "-c", "email.arrived",
                   "-e", "-t", "0", "-h", "string:desktop-entry:org.test.Mail", "-h", "int:x:5", "-h", "int:y:6",
                   "-h", "boolean:resident:true", "-h", "boolean:suppress-sound:true",
                   "-h", "string:sound-name:message-new-email", "-h", "string:image-path:/tmp/pic.png",
