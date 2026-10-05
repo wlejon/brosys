@@ -46,12 +46,53 @@ public:
     void set_scan_hook(std::function<void(const std::string& device)> hook);
     int scan_requests() const;
 
+    struct AddAndActivateCall {
+        brosys::dbus::Value connection;
+        std::string device;
+        std::string specific_object;
+    };
+
+    struct ActivateCall {
+        std::string connection;
+        std::string device;
+        std::string specific_object;
+    };
+
+    // Configured connection profiles (Settings service)
+    void add_connection(const std::string& path, const brosys::dbus::Value& settings);
+    void remove_connection(const std::string& path);
+
+    // Call history
+    std::vector<AddAndActivateCall> add_and_activate_calls() const;
+    std::vector<ActivateCall> activate_calls() const;
+    std::vector<std::string> deactivate_calls() const;
+    std::vector<std::string> device_disconnect_calls() const;
+
+    // Hooks for testing failure or custom behavior
+    void set_add_and_activate_hook(
+        std::function<brosys::dbus::MethodResult(const brosys::dbus::Value&, const std::string&, const std::string&)> hook);
+    void set_activate_hook(
+        std::function<brosys::dbus::MethodResult(const std::string&, const std::string&, const std::string&)> hook);
+    void set_deactivate_hook(std::function<brosys::dbus::MethodResult(const std::string&)> hook);
+    void set_device_disconnect_hook(std::function<brosys::dbus::MethodResult(const std::string&)> hook);
+
 private:
     std::shared_ptr<brosys::dbus::Interface> make_interface(const std::string& path, const std::string& iface);
     brosys::dbus::Value managed_objects() const;
 
     mutable std::mutex mu_;
     std::map<std::string, Object> objects_;
+    std::map<std::string, brosys::dbus::Value> connections_;
+    std::vector<AddAndActivateCall> add_and_activate_calls_;
+    std::vector<ActivateCall> activate_calls_;
+    std::vector<std::string> deactivate_calls_;
+    std::vector<std::string> device_disconnect_calls_;
+
+    std::function<brosys::dbus::MethodResult(const brosys::dbus::Value&, const std::string&, const std::string&)> add_and_activate_hook_;
+    std::function<brosys::dbus::MethodResult(const std::string&, const std::string&, const std::string&)> activate_hook_;
+    std::function<brosys::dbus::MethodResult(const std::string&)> deactivate_hook_;
+    std::function<brosys::dbus::MethodResult(const std::string&)> device_disconnect_hook_;
+
     ScanMode scan_mode_ = ScanMode::Complete;
     int scan_delay_ms_ = 100;
     int scan_requests_ = 0;

@@ -98,6 +98,166 @@ public:
         return accepted > 0 ? Result::success() : Result::failure(first_error);
     }
 
+    Result connect_wifi(const std::string& device_id, const std::string& ssid,
+                        const std::string& passphrase, WifiSecurity security) override {
+        std::string dev_path;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            if (!device_id.empty()) {
+                for (auto& d : state_.devices) {
+                    if (d.id == device_id || d.interface_name == device_id) {
+                        dev_path = d.id;
+                        break;
+                    }
+                }
+                if (dev_path.empty() && device_id[0] == '/') dev_path = device_id;
+            } else {
+                for (auto& d : state_.devices) {
+                    if (d.type == LinkType::WiFi) {
+                        dev_path = d.id;
+                        break;
+                    }
+                }
+            }
+        }
+
+        std::vector<std::pair<std::string, Value>> conn_props;
+        conn_props.emplace_back("id", Value::str(ssid));
+        conn_props.emplace_back("type", Value::str("802-11-wireless"));
+
+        std::vector<std::pair<std::string, Value>> wifi_props;
+        wifi_props.emplace_back("ssid", Value::bytes(std::vector<uint8_t>(ssid.begin(), ssid.end())));
+        wifi_props.emplace_back("mode", Value::str("infrastructure"));
+
+        std::vector<std::pair<std::string, Value>> sec_props;
+        if (security != WifiSecurity::Open && security != WifiSecurity::Unknown) {
+            if (security == WifiSecurity::Wep) {
+                sec_props.emplace_back("key-mgmt", Value::str("none"));
+                sec_props.emplace_back("wep-key0", Value::str(passphrase));
+            } else if (security == WifiSecurity::Wpa3Personal) {
+                sec_props.emplace_back("key-mgmt", Value::str("sae"));
+                sec_props.emplace_back("psk", Value::str(passphrase));
+            } else {
+                sec_props.emplace_back("key-mgmt", Value::str("wpa-psk"));
+                sec_props.emplace_back("psk", Value::str(passphrase));
+            }
+        }
+
+        std::vector<std::pair<Value, Value>> settings;
+        settings.emplace_back(Value::str("connection"), Value::vardict(conn_props));
+        settings.emplace_back(Value::str("802-11-wireless"), Value::vardict(wifi_props));
+        if (!sec_props.empty()) {
+            settings.emplace_back(Value::str("802-11-wireless-security"), Value::vardict(sec_props));
+        }
+
+        Value conn_dict = Value::dict("s", "a{sv}", settings);
+        dbus::Reply r = conn_->call(nm::kService, nm::kPath, nm::kIface, "AddAndActivateConnection",
+                                    {conn_dict, Value::obj(dev_path.empty() ? "/" : dev_path), Value::obj("/")});
+        return r.ok ? Result::success() : Result::failure(r.error());
+    }
+
+    Result disconnect(const std::string& connection_id_or_device_id) override {
+        std::string active_path;
+        std::string dev_path;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            if (connection_id_or_device_id.empty()) {
+                if (!state_.active_connections.empty()) {
+                    active_path = state_.active_connections.front().id;
+                }
+            } else {
+                for (auto& ac : state_.active_connections) {
+                    if (ac.id == connection_id_or_device_id || ac.uuid == connection_id_or_device_id ||
+                        ac.name == connection_id_or_device_id) {
+                        active_path = ac.id;
+                        break;
+                    }
+                }
+                if (active_path.empty()) {
+                    for (auto& d : state_.devices) {
+                        if (d.id == connection_id_or_device_id || d.interface_name == connection_id_or_device_id) {
+                            dev_path = d.id;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if (!active_path.empty()) {
+            dbus::Reply r = conn_->call(nm::kService, nm::kPath, nm::kIface, "DeactivateConnection",
+                                        {Value::obj(active_path)});
+            return r.ok ? Result::success() : Result::failure(r.error());
+        }
+        if (!dev_path.empty()) {
+            dbus::Reply r = conn_->call(nm::kService, dev_path, nm::kDevice, "Disconnect");
+            return r.ok ? Result::success() : Result::failure(r.error());
+        }
+        if (connection_id_or_device_id.rfind("/org/freedesktop/NetworkManager", 0) == 0) {
+            dbus::Reply r = conn_->call(nm::kService, nm::kPath, nm::kIface, "DeactivateConnection",
+                                        {Value::obj(connection_id_or_device_id)});
+            return r.ok ? Result::success() : Result::failure(r.error());
+        }
+        return Result::failure("connection or device not found: " + connection_id_or_device_id);
+    }
+
+    Result connect_vpn(const std::string& vpn_name_or_uuid) override {
+        // Query configured connections from Settings
+        dbus::Reply list_rep = conn_->call(nm::kService, "/org/freedesktop/NetworkManager/Settings",
+                                           "org.freedesktop.NetworkManager.Settings", "ListConnections");
+        if (!list_rep.ok) return Result::failure("Settings.ListConnections failed: " + list_rep.error());
+        if (list_rep.values.empty()) return Result::failure("no connections found");
+
+        std::string found_conn_path;
+        for (auto& p_val : list_rep.values[0].items()) {
+            std::string c_path = p_val.as_string();
+            dbus::Reply set_rep = conn_->call(nm::kService, c_path,
+                                              "org.freedesktop.NetworkManager.Settings.Connection", "GetSettings");
+            if (!set_rep.ok || set_rep.values.empty()) continue;
+            auto* conn_sec = set_rep.values[0].lookup("connection");
+            if (!conn_sec) continue;
+            auto* id_val = conn_sec->lookup("id");
+            auto* uuid_val = conn_sec->lookup("uuid");
+            auto* type_val = conn_sec->lookup("type");
+            std::string id = id_val ? id_val->as_string() : "";
+            std::string uuid = uuid_val ? uuid_val->as_string() : "";
+            std::string type = type_val ? type_val->as_string() : "";
+
+            if ((id == vpn_name_or_uuid || uuid == vpn_name_or_uuid) &&
+                (type == "vpn" || type == "wireguard")) {
+                found_conn_path = c_path;
+                break;
+            }
+        }
+
+        if (found_conn_path.empty()) {
+            return Result::failure("VPN connection not found: " + vpn_name_or_uuid);
+        }
+
+        dbus::Reply r = conn_->call(nm::kService, nm::kPath, nm::kIface, "ActivateConnection",
+                                    {Value::obj(found_conn_path), Value::obj("/"), Value::obj("/")});
+        return r.ok ? Result::success() : Result::failure(r.error());
+    }
+
+    Result disconnect_vpn(const std::string& vpn_name_or_uuid) override {
+        std::string active_path;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            for (auto& ac : state_.active_connections) {
+                if (ac.type == LinkType::Vpn &&
+                    (ac.name == vpn_name_or_uuid || ac.uuid == vpn_name_or_uuid || ac.id == vpn_name_or_uuid)) {
+                    active_path = ac.id;
+                    break;
+                }
+            }
+        }
+        if (active_path.empty()) {
+            return Result::failure("active VPN connection not found: " + vpn_name_or_uuid);
+        }
+        dbus::Reply r = conn_->call(nm::kService, nm::kPath, nm::kIface, "DeactivateConnection",
+                                    {Value::obj(active_path)});
+        return r.ok ? Result::success() : Result::failure(r.error());
+    }
+
 private:
     // ------------------------------------------------------------ bus thread
 

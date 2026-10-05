@@ -99,6 +99,22 @@ public:
         return fut.get();
     }
 
+    Result connect_wifi(const std::string&, const std::string&, const std::string&, WifiSecurity) override {
+        return Result::failure("connect_wifi is unsupported on Windows");
+    }
+
+    Result disconnect(const std::string&) override {
+        return Result::failure("disconnect is unsupported on Windows");
+    }
+
+    Result connect_vpn(const std::string&) override {
+        return Result::failure("connect_vpn is unsupported on Windows");
+    }
+
+    Result disconnect_vpn(const std::string&) override {
+        return Result::failure("disconnect_vpn is unsupported on Windows");
+    }
+
 private:
     struct ScanSignal {
         std::string device_id;

@@ -298,6 +298,205 @@ void run_test() {
     nm->set(kWifi, kWireless, {{"LastScan", Value::i64(1234567)}});
     done = log.wait<WifiScanCompleted>(5000ms);
     CHECK(done && done->ok);
+
+    // ---- network control operations (Wi-Fi, disconnect, VPN)
+    // 1. connect_wifi (WPA2-Personal, auto-detecting Wi-Fi device)
+    auto res = net->connect_wifi("", "TestWifi", "secret123", brosys::WifiSecurity::Wpa2Personal);
+    CHECK(res.ok);
+    auto aa_calls = nm->add_and_activate_calls();
+    REQUIRE(aa_calls.size() == 1);
+    CHECK_EQ(aa_calls[0].device, std::string(kWifi));
+    CHECK_EQ(aa_calls[0].specific_object, std::string("/"));
+    auto* conn_sec = aa_calls[0].connection.lookup("connection");
+    REQUIRE(conn_sec != nullptr);
+    CHECK_EQ(conn_sec->lookup("id")->as_string(), std::string("TestWifi"));
+    CHECK_EQ(conn_sec->lookup("type")->as_string(), std::string("802-11-wireless"));
+    auto* wifi_sec = aa_calls[0].connection.lookup("802-11-wireless");
+    REQUIRE(wifi_sec != nullptr);
+    CHECK_EQ(wifi_sec->lookup("mode")->as_string(), std::string("infrastructure"));
+    auto* sec_sec = aa_calls[0].connection.lookup("802-11-wireless-security");
+    REQUIRE(sec_sec != nullptr);
+    CHECK_EQ(sec_sec->lookup("key-mgmt")->as_string(), std::string("wpa-psk"));
+    CHECK_EQ(sec_sec->lookup("psk")->as_string(), std::string("secret123"));
+
+    // connect_wifi (WPA3-Personal with device path)
+    res = net->connect_wifi(kWifi, "Wpa3Wifi", "pass3", brosys::WifiSecurity::Wpa3Personal);
+    CHECK(res.ok);
+    aa_calls = nm->add_and_activate_calls();
+    REQUIRE(aa_calls.size() == 2);
+    CHECK_EQ(aa_calls[1].device, std::string(kWifi));
+    sec_sec = aa_calls[1].connection.lookup("802-11-wireless-security");
+    REQUIRE(sec_sec != nullptr);
+    CHECK_EQ(sec_sec->lookup("key-mgmt")->as_string(), std::string("sae"));
+    CHECK_EQ(sec_sec->lookup("psk")->as_string(), std::string("pass3"));
+
+    // connect_wifi (Open security with interface name)
+    res = net->connect_wifi("wlan0", "OpenNet", "", brosys::WifiSecurity::Open);
+    CHECK(res.ok);
+    aa_calls = nm->add_and_activate_calls();
+    REQUIRE(aa_calls.size() == 3);
+    CHECK_EQ(aa_calls[2].device, std::string(kWifi));
+    CHECK(aa_calls[2].connection.lookup("802-11-wireless-security") == nullptr);
+
+    // connect_wifi (WEP security)
+    res = net->connect_wifi("wlan0", "WepNet", "weppass", brosys::WifiSecurity::Wep);
+    CHECK(res.ok);
+    aa_calls = nm->add_and_activate_calls();
+    REQUIRE(aa_calls.size() == 4);
+    sec_sec = aa_calls[3].connection.lookup("802-11-wireless-security");
+    REQUIRE(sec_sec != nullptr);
+    CHECK_EQ(sec_sec->lookup("key-mgmt")->as_string(), std::string("none"));
+    CHECK_EQ(sec_sec->lookup("wep-key0")->as_string(), std::string("weppass"));
+
+    // connect_wifi failure handling
+    nm->set_add_and_activate_hook([](const auto&, const auto&, const auto&) {
+        return brosys::dbus::MethodResult::error("org.freedesktop.NetworkManager.Failed", "Connection failed");
+    });
+    res = net->connect_wifi("wlan0", "FailNet", "pass", brosys::WifiSecurity::Wpa2Personal);
+    CHECK(!res.ok);
+    CHECK(res.error.find("Connection failed") != std::string::npos);
+    nm->set_add_and_activate_hook(nullptr);
+
+    // 2. disconnect
+    // Disconnect active connection by default ("")
+    res = net->disconnect("");
+    CHECK(res.ok);
+    auto deact_calls = nm->deactivate_calls();
+    REQUIRE(deact_calls.size() == 1);
+    CHECK_EQ(deact_calls[0], std::string(kAc));
+
+    // Disconnect active connection by name
+    res = net->disconnect("Wired 1");
+    CHECK(res.ok);
+    deact_calls = nm->deactivate_calls();
+    REQUIRE(deact_calls.size() == 2);
+    CHECK_EQ(deact_calls[1], std::string(kAc));
+
+    // Disconnect active connection by UUID
+    res = net->disconnect("u-1");
+    CHECK(res.ok);
+    deact_calls = nm->deactivate_calls();
+    REQUIRE(deact_calls.size() == 3);
+    CHECK_EQ(deact_calls[2], std::string(kAc));
+
+    // Disconnect device by interface name
+    res = net->disconnect("wlan0");
+    CHECK(res.ok);
+    auto dev_disc_calls = nm->device_disconnect_calls();
+    REQUIRE(dev_disc_calls.size() == 1);
+    CHECK_EQ(dev_disc_calls[0], std::string(kWifi));
+
+    // Disconnect device by device path
+    res = net->disconnect(kWifi);
+    CHECK(res.ok);
+    dev_disc_calls = nm->device_disconnect_calls();
+    REQUIRE(dev_disc_calls.size() == 2);
+    CHECK_EQ(dev_disc_calls[1], std::string(kWifi));
+
+    // Disconnect non-existent device/connection
+    res = net->disconnect("unknown-net-dev");
+    CHECK(!res.ok);
+
+    // Disconnect error hook
+    nm->set_deactivate_hook([](const auto&) {
+        return brosys::dbus::MethodResult::error("org.freedesktop.NetworkManager.Failed", "Deactivation failed");
+    });
+    res = net->disconnect(kAc);
+    CHECK(!res.ok);
+    CHECK(res.error.find("Deactivation failed") != std::string::npos);
+    nm->set_deactivate_hook(nullptr);
+
+    // 3. connect_vpn
+    // Add VPN connections to Settings
+    constexpr const char* kSettingsVpn = "/org/freedesktop/NetworkManager/Settings/10";
+    constexpr const char* kSettingsWg = "/org/freedesktop/NetworkManager/Settings/11";
+    std::vector<std::pair<std::string, Value>> vpn_props;
+    vpn_props.emplace_back("id", Value::str("Corporate VPN"));
+    vpn_props.emplace_back("uuid", Value::str("vpn-uuid-corp"));
+    vpn_props.emplace_back("type", Value::str("vpn"));
+    nm->add_connection(kSettingsVpn, Value::dict("s", "a{sv}", {{Value::str("connection"), Value::vardict(vpn_props)}}));
+
+    std::vector<std::pair<std::string, Value>> wg_props;
+    wg_props.emplace_back("id", Value::str("Home WG"));
+    wg_props.emplace_back("uuid", Value::str("wg-uuid-home"));
+    wg_props.emplace_back("type", Value::str("wireguard"));
+    nm->add_connection(kSettingsWg, Value::dict("s", "a{sv}", {{Value::str("connection"), Value::vardict(wg_props)}}));
+
+    // Connect by name
+    res = net->connect_vpn("Corporate VPN");
+    CHECK(res.ok);
+    auto act_calls = nm->activate_calls();
+    REQUIRE(act_calls.size() == 1);
+    CHECK_EQ(act_calls[0].connection, std::string(kSettingsVpn));
+    CHECK_EQ(act_calls[0].device, std::string("/"));
+
+    // Connect by UUID
+    res = net->connect_vpn("vpn-uuid-corp");
+    CHECK(res.ok);
+    act_calls = nm->activate_calls();
+    REQUIRE(act_calls.size() == 2);
+    CHECK_EQ(act_calls[1].connection, std::string(kSettingsVpn));
+
+    // Connect wireguard VPN
+    res = net->connect_vpn("Home WG");
+    CHECK(res.ok);
+    act_calls = nm->activate_calls();
+    REQUIRE(act_calls.size() == 3);
+    CHECK_EQ(act_calls[2].connection, std::string(kSettingsWg));
+
+    // Connect non-existent VPN
+    res = net->connect_vpn("NoSuchVPN");
+    CHECK(!res.ok);
+    CHECK(res.error.find("VPN connection not found") != std::string::npos);
+
+    // Connect VPN error hook
+    nm->set_activate_hook([](const auto&, const auto&, const auto&) {
+        return brosys::dbus::MethodResult::error("org.freedesktop.NetworkManager.Failed", "Activation rejected");
+    });
+    res = net->connect_vpn("Corporate VPN");
+    CHECK(!res.ok);
+    CHECK(res.error.find("Activation rejected") != std::string::npos);
+    nm->set_activate_hook(nullptr);
+
+    // 4. disconnect_vpn
+    // Add active VPN connection to FakeNM
+    constexpr const char* kAcVpn = "/org/freedesktop/NetworkManager/ActiveConnection/20";
+    nm->add_object(kAcVpn, {{kActive,
+                             {{"Id", Value::str("Corporate VPN")},
+                              {"Uuid", Value::str("vpn-uuid-corp")},
+                              {"Type", Value::str("vpn")},
+                              {"State", Value::u32(2)},
+                              {"Devices", paths({})},
+                              {"Default", Value::boolean(false)},
+                              {"Default6", Value::boolean(false)},
+                              {"Vpn", Value::boolean(true)}}}});
+    nm->set(kMgr, kNM, {{"ActiveConnections", paths({kAc, kAcVpn})}});
+
+    ev = log.wait<NetworkChanged>([](const NetworkChanged& c) { return c.state.active_connections.size() == 2; });
+    REQUIRE(ev.has_value());
+
+    // Disconnect active VPN by name
+    res = net->disconnect_vpn("Corporate VPN");
+    CHECK(res.ok);
+    deact_calls = nm->deactivate_calls();
+    CHECK_EQ(deact_calls.back(), std::string(kAcVpn));
+
+    // Disconnect active VPN by UUID
+    res = net->disconnect_vpn("vpn-uuid-corp");
+    CHECK(res.ok);
+    deact_calls = nm->deactivate_calls();
+    CHECK_EQ(deact_calls.back(), std::string(kAcVpn));
+
+    // Disconnect active VPN by object path
+    res = net->disconnect_vpn(kAcVpn);
+    CHECK(res.ok);
+    deact_calls = nm->deactivate_calls();
+    CHECK_EQ(deact_calls.back(), std::string(kAcVpn));
+
+    // Disconnect non-existent VPN
+    res = net->disconnect_vpn("NoSuchVPN");
+    CHECK(!res.ok);
+    CHECK(res.error.find("active VPN connection not found") != std::string::npos);
 }
 
 }  // namespace

@@ -161,6 +161,19 @@ public:
     // Starts a scan ("" = every Wi-Fi device). Returns once the request is
     // accepted; each device reports a WifiScanCompleted when the scan ends.
     virtual Result request_wifi_scan(const std::string& device_id) = 0;
+
+    // Connects to a Wi-Fi network (creates and activates or activates connection).
+    virtual Result connect_wifi(const std::string& device_id, const std::string& ssid,
+                                const std::string& passphrase, WifiSecurity security) = 0;
+
+    // Disconnects an active connection (by path, uuid, or name) or device (by path or interface name).
+    virtual Result disconnect(const std::string& connection_id_or_device_id) = 0;
+
+    // Activates a VPN connection (by profile name or UUID).
+    virtual Result connect_vpn(const std::string& vpn_name_or_uuid) = 0;
+
+    // Deactivates a VPN connection (by profile name, UUID, or active connection path).
+    virtual Result disconnect_vpn(const std::string& vpn_name_or_uuid) = 0;
 };
 
 const char* to_string(Connectivity c);

@@ -100,6 +100,22 @@ public:
         return Result::success();
     }
 
+    Result connect_wifi(const std::string&, const std::string&, const std::string&, WifiSecurity) override {
+        return Result::failure("connect_wifi is unsupported on macOS");
+    }
+
+    Result disconnect(const std::string&) override {
+        return Result::failure("disconnect is unsupported on macOS");
+    }
+
+    Result connect_vpn(const std::string&) override {
+        return Result::failure("connect_vpn is unsupported on macOS");
+    }
+
+    Result disconnect_vpn(const std::string&) override {
+        return Result::failure("disconnect_vpn is unsupported on macOS");
+    }
+
 private:
     static void store_cb(SCDynamicStoreRef, CFArrayRef, void* info) {
         static_cast<MacNetworkService*>(info)->schedule_refresh();
