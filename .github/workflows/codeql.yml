@@ -1,0 +1,63 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+# brosys exports objects on the session bus (the notification server, the
+# StatusNotifier watcher, dbusmenu) and decodes whatever any other process on
+# that bus sends them: icon pixmaps with caller-supplied width, height and
+# stride, menu layouts, hint dictionaries. Out-of-bounds reads in those
+# conversions and integer overflow in pixmap sizing are the realistic bugs,
+# and they are what the C++ queries look for. The Linux backends (sd-bus,
+# PipeWire) are what this analyses.
+#
+# brosys has no vendored or sibling code, so there is nothing to pre-build
+# outside the trace: every translation unit compiled below is ours.
+jobs:
+  analyze:
+    name: Analyze C++
+    runs-on: ubuntu-24.04
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: brosys
+
+      - name: Install packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ninja-build pkg-config libsystemd-dev libpipewire-0.3-dev
+
+      # Tests off: their helpers and fakes are test scaffolding, not code that
+      # ships, and alerts in them would only be noise.
+      - name: Configure
+        run: cmake -S brosys -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBROSYS_BUILD_TESTS=OFF
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: c-cpp
+          build-mode: manual
+          source-root: brosys
+          queries: security-extended
+
+      - name: Build brosys (traced)
+        run: cmake --build build --parallel 4
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:c-cpp

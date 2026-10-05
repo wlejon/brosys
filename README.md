@@ -1,7 +1,9 @@
 # brosys
 
-System-services substrate for a desktop environment built on the bro
-runtime: power, audio, network, notifications and the tray. A standalone
+[![CI](https://github.com/wlejon/brosys/actions/workflows/ci.yml/badge.svg)](https://github.com/wlejon/brosys/actions/workflows/ci.yml)
+
+System-services substrate for a desktop environment built on the
+[bro](https://github.com/wlejon/bro) runtime: power, audio, network, notifications and the tray. A standalone
 C++20 library: no dependency on bro or bronze, no JS binding, its own CMake
 and ctest.
 
@@ -65,6 +67,9 @@ main thread AppKit requires. Objective-C++ is confined to `src/mac/*.mm`
 (CoreWLAN, Network.framework, NSWorkspace) behind C++ headers.
 
 ## Building
+
+There are no sibling repos to fetch: brosys needs CMake 3.24+, a C++20
+compiler and the OS (on Linux, sd-bus from libsystemd and optionally PipeWire).
 
 Windows (Visual Studio generator, one build dir):
 

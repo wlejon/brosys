@@ -1,0 +1,180 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# brosys has no sibling dependencies; it links the OS (sd-bus and, optionally,
+# PipeWire on Linux). The repo is still checked out into a named path
+# (brosys/), the layout every sibling's CI uses.
+#
+# The Linux tests are real: every mutation runs on a private dbus-daemon
+# against a real upowerd under umockdev, a real PipeWire + WirePlumber, real
+# notify-send / gdbus / busctl clients and a real libayatana-appindicator GTK
+# item. So the job installs the services and the oracle tools, not just the
+# headers. A test whose service a hosted runner genuinely lacks (a user
+# PipeWire session, Wi-Fi hardware) exits 77 and ctest reports it skipped,
+# with the reason in the log.
+env:
+  LINUX_BUILD_PACKAGES: >-
+    ninja-build pkg-config libsystemd-dev
+  LINUX_PIPEWIRE_PACKAGES: >-
+    libpipewire-0.3-dev pipewire pipewire-bin wireplumber pipewire-pulse pulseaudio-utils
+  LINUX_ORACLE_PACKAGES: >-
+    dbus-daemon dbus-bin libnotify-bin libglib2.0-bin umockdev libumockdev-dev upower
+    network-manager libayatana-appindicator3-dev xvfb xauth iproute2
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-gcc,          os: ubuntu-24.04, cc: gcc,   cxx: g++,     config: Release }
+          - { name: linux-clang,        os: ubuntu-24.04, cc: clang, cxx: clang++, config: Release }
+          - { name: windows-msvc,       os: windows-2022,                          config: Release }
+          # Debug CRT: iterator debugging and the library's own assert()s.
+          - { name: windows-msvc-debug, os: windows-2022,                          config: Debug }
+          - { name: macos-arm64,        os: macos-15,                              config: Release }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: brosys
+
+      - name: Install packages (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            $LINUX_BUILD_PACKAGES $LINUX_PIPEWIRE_PACKAGES $LINUX_ORACLE_PACKAGES
+
+      # SwitchAudioSource is test_mac_audio's oracle.
+      - name: Install packages (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja switchaudio-osx
+
+      - name: Configure
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cmake -S brosys -B build
+          else
+            cmake -S brosys -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.config }}
+          fi
+
+      - name: Build
+        run: cmake --build build --config ${{ matrix.config }} --parallel 4
+
+      - name: Test
+        run: ctest --test-dir build -C ${{ matrix.config }} --output-on-failure
+
+  # ── PipeWire-free tier ────────────────────────────────────────────────────
+  #
+  # BROSYS_WITH_PIPEWIRE is on whenever libpipewire-0.3 is found, so every
+  # default Linux build has the audio backend. Without it the library builds
+  # the honest "audio unavailable" service instead, and a stray PipeWire
+  # include or symbol outside the guard compiles everywhere except here. Only
+  # sd-bus is installed: no PipeWire headers, so the default resolves OFF the
+  # way it would on a distribution that does not ship them.
+  no-pipewire:
+    name: No PipeWire · ubuntu-24.04
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: brosys
+
+      - name: Install packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends $LINUX_BUILD_PACKAGES $LINUX_ORACLE_PACKAGES
+
+      - name: Configure
+        run: |
+          cmake -S brosys -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          grep -q '^BROSYS_WITH_PIPEWIRE:BOOL=OFF' build/CMakeCache.txt
+
+      - name: Build
+        run: cmake --build build --parallel 4
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  # ── Coverage ──────────────────────────────────────────────────────────────
+  #
+  # Debug (-O0), so this is also the Linux job where assert()s are live.
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: brosys
+
+      - name: Install packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends gcovr \
+            $LINUX_BUILD_PACKAGES $LINUX_PIPEWIRE_PACKAGES $LINUX_ORACLE_PACKAGES
+
+      - name: Configure (instrumented)
+        run: |
+          cmake -S brosys -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DBROSYS_COVERAGE=ON
+
+      - name: Build
+        run: cmake --build build --parallel 4
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      # pipefail: piping gcovr into tee otherwise hands the step tee's exit
+      # status, so a gcovr crash produces no report and the job still goes green.
+      #
+      # Run from the workspace root, where build/ is, with the filters spelled
+      # brosys/...: gcovr only looks for .gcda files under its root.
+      - name: Report
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p coverage-html
+          gcovr --root . \
+            --filter 'brosys/src/' --filter 'brosys/include/brosys/' \
+            --exclude-unreachable-branches \
+            --print-summary \
+            --html-details coverage-html/index.html \
+            | tee coverage-summary.txt
+          test -s coverage-html/index.html
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo '## Coverage — `src/` + `include/brosys/`'
+            echo
+            echo 'Linux backends only (sd-bus, PipeWire); the Windows and macOS backends are exercised by the test matrix, not measured.'
+            echo
+            echo '```'
+            cat coverage-summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-html
+          path: coverage-html/
+          retention-days: 14

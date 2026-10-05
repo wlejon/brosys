@@ -24,6 +24,18 @@ endif()
 
 option(BROSYS_BUILD_TESTS "Build the brosys tests" ${_brosys_top_level})
 
+# Coverage. Scoped to a top-level build: a consumer that add_subdirectory()s
+# brosys has no business having its own build instrumented from in here.
+option(BROSYS_COVERAGE "Instrument the build for gcov coverage (GCC/Clang)" OFF)
+if(BROSYS_COVERAGE AND _brosys_top_level)
+    if(MSVC)
+        message(FATAL_ERROR "BROSYS_COVERAGE requires GCC or Clang (gcov instrumentation); MSVC is unsupported.")
+    endif()
+    add_compile_options(--coverage -O0 -g)
+    add_link_options(--coverage)
+    message(STATUS "brosys: coverage instrumentation ON (-O0)")
+endif()
+
 if(MSVC AND _brosys_top_level)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
