@@ -79,6 +79,16 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C ${{ matrix.config }} --output-on-failure
 
+      # ctest shows a skipped test's output nowhere, so its reason goes to the
+      # job summary: a skip is only honest if someone can read why.
+      - name: Skip reasons
+        if: always()
+        shell: bash
+        run: |
+          { echo "### Skipped tests (${{ matrix.name }})"; echo '```'
+            grep -h 'SKIPPED:' build/Testing/Temporary/LastTest*.log || echo none
+            echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+
   # ── PipeWire-free tier ────────────────────────────────────────────────────
   #
   # BROSYS_WITH_PIPEWIRE is on whenever libpipewire-0.3 is found, so every
@@ -110,6 +120,13 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+      - name: Skip reasons
+        if: always()
+        run: |
+          { echo '### Skipped tests (no PipeWire)'; echo '```'
+            grep -h 'SKIPPED:' build/Testing/Temporary/LastTest*.log || echo none
+            echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
 
   # ── Coverage ──────────────────────────────────────────────────────────────
   #

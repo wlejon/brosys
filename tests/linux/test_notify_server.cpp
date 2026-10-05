@@ -189,7 +189,11 @@ void test_actions(const bstest::PrivateBus& bus) {
     bstest::SignalLog sig(bus.address(), "type='signal',interface='org.freedesktop.Notifications'");
     REQUIRE(sig.ok());
 
-    bstest::Daemon client({"notify-send", "-p", "--action=ok=OK", "--action=cancel=Cancel", "Act", "choose"}, bus.env());
+    // stdbuf -oL: notify-send prints the id with stdio, which a pipe block-buffers, and older
+    // libnotify (0.8.3, Ubuntu 24.04) never flushes it while it waits for the action. Without
+    // line buffering the id only arrives when the notification expires and notify-send exits.
+    bstest::Daemon client({"stdbuf", "-oL", "notify-send", "-p", "--action=ok=OK", "--action=cancel=Cancel", "Act", "choose"},
+                          bus.env());
     std::string line;
     REQUIRE(client.read_line(line, 10000ms));
     uint32_t id = parse_uint(line);
@@ -220,7 +224,7 @@ void test_actions(const bstest::PrivateBus& bus) {
     CHECK(c && c->reason == CloseReason::Dismissed);
 
     // --wait: the client waits until the host closes it.
-    bstest::Daemon waiter({"notify-send", "-p", "-w", "Waiting"}, bus.env());
+    bstest::Daemon waiter({"stdbuf", "-oL", "notify-send", "-p", "-w", "Waiting"}, bus.env());
     REQUIRE(waiter.read_line(line, 10000ms));
     uint32_t wid = parse_uint(line);
     REQUIRE(wid != 0);
@@ -478,7 +482,7 @@ void test_bus_restart() {
 
 int main() {
     std::signal(SIGPIPE, SIG_IGN);
-    for (const char* tool : {"notify-send", "gdbus"})
+    for (const char* tool : {"notify-send", "gdbus", "stdbuf"})
         if (!bstest::have_program(tool))
             bstest::skip("test_notify_server", std::string(tool) + " is not installed (libnotify-bin / libglib2.0-bin)");
     {

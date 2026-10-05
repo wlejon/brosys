@@ -204,7 +204,20 @@ void check_general(const brosys::NetworkState& s) {
             }
         }
         auto* p = s.primary();
-        if (!dev.empty()) {
+        // NetworkManager can only name a primary among devices it manages. A machine whose
+        // default route is configured by something else (systemd-networkd, netplan on a
+        // server or CI runner) has NM running with that device unmanaged: there the kernel's
+        // route says nothing about NM's primary, and the backend must not invent one.
+        const brosys::NetDevice* route_dev = nullptr;
+        for (auto& d : s.devices)
+            if (d.interface_name == dev) route_dev = &d;
+        if (!dev.empty() && (!route_dev || !route_dev->managed || route_dev->connection.empty())) {
+            std::printf("note: default route via %s, which has no NetworkManager connection; primary cross-check skipped\n",
+                        dev.c_str());
+            int primaries = 0;
+            for (auto& d : s.devices) primaries += d.is_primary;
+            CHECK(primaries <= 1);
+        } else if (!dev.empty()) {
             CHECK(p != nullptr);
             if (p) CHECK_EQ(p->interface_name, dev);
             int primaries = 0;

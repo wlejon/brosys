@@ -294,6 +294,9 @@ void run_test() {
     ev = log.wait<PowerChanged>([](const PowerChanged& c) { return find_dev(c.state, "battery_BAT1") == nullptr; });
     CHECK(ev.has_value());
     if (ev) CHECK(ev->state.percent && std::fabs(*ev->state.percent - 50.0) < 0.01);
+    // The "remove" uevent explicitly, as udev would send it: umockdev_testbed_remove_device()
+    // only deletes the sysfs node, and upowerd 1.90.3 (Ubuntu 24.04) waits for the event.
+    umockdev_testbed_uevent(bed.tb, bat1.c_str(), "remove");
     umockdev_testbed_remove_device(bed.tb, bat1.c_str());
     CHECK(bstest::wait_until([&] { return upower_dump(bus).devices.count("/org/freedesktop/UPower/devices/battery_BAT1") == 0; },
                              10000ms, 100ms));
