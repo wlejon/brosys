@@ -1,102 +1,163 @@
+// Network: connectivity, devices with their IP configuration, which device
+// carries the default route (the primary), active connections, and Wi-Fi
+// access points with scans that report completion.
+//
+// Linux: NetworkManager over the system bus (Connectivity, PrimaryConnection,
+// ActiveConnections, Devices, Ip4/Ip6Config, wireless AccessPoints,
+// RequestScan + LastScan).
+// Windows: IP Helper (adapters, route table: the primary is the interface of
+// the best default route), NotifyIpInterfaceChange / NotifyRouteChange2 /
+// NotifyUnicastIpAddressChange / NotifyNetworkConnectivityHintChange, and
+// the WLAN API (BSS list for BSSID / channel / RSSI; scan completion via
+// WlanRegisterNotification).
 #pragma once
 
-#include "brosys/export.h"
+#include "brosys/common.h"
+#include "brosys/event_queue.h"
 
-#include <functional>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace brosys {
 
-enum class ConnectionType {
-    None = 0,
-    Ethernet = 1,
-    WiFi = 2,
-    Cellular = 3,
-    Other = 4
+enum class Connectivity {
+    Unknown,
+    None,     // no network
+    Portal,   // behind a captive portal
+    Limited,  // network but no internet
+    Full,
 };
 
-enum class ConnectionState {
-    Disconnected = 0,
-    Connecting = 1,
-    Connected = 2
+enum class LinkType { Unknown, Ethernet, WiFi, Cellular, Loopback, Bridge, Vpn, Tunnel, Virtual, Other };
+
+enum class LinkState {
+    Unknown,
+    Unavailable,   // no carrier / radio off / unmanaged
+    Disconnected,  // available, not connected
+    Connecting,    // link up, configuring (DHCP, auth)
+    Connected,
+    Disconnecting,
 };
 
-enum class SecurityType {
-    Open = 0,
-    WEP = 1,
-    WPA_Personal = 2,
-    WPA2_Personal = 3,
-    WPA3_Personal = 4,
-    WPA_Enterprise = 5,
-    WPA2_Enterprise = 6,
-    WPA3_Enterprise = 7,
-    Unknown = 8
+struct IpConfig {
+    std::vector<std::string> addresses;  // CIDR: "192.168.1.5/24", "fe80::1/64"
+    std::vector<std::string> gateways;
+    std::vector<std::string> dns;
+
+    bool operator==(const IpConfig&) const = default;
 };
 
-struct WiFiAccessPoint {
-    std::string ssid;
-    std::string bssid;
-    int signal_strength_percent = 0; // 0 - 100
-    int signal_strength_dbm = -100;   // e.g. -65 dBm
-    SecurityType security = SecurityType::Unknown;
-    int channel = 0;
-    int frequency_mhz = 0;
-    bool is_connected = false;
+struct NetDevice {
+    std::string id;              // NM device path; Windows interface LUID (decimal)
+    std::string interface_name;  // "enp7s0", "wlan0"; Windows alias "Ethernet 2"
+    std::string description;     // driver / adapter description
+    LinkType type = LinkType::Unknown;
+    LinkState state = LinkState::Unknown;
+    std::string mac;             // "aa:bb:cc:dd:ee:ff", "" when none
+    std::string connection;      // active connection / profile name ("" when none)
+    uint64_t speed_mbps = 0;     // 0 unknown
+    IpConfig ipv4;
+    IpConfig ipv6;
+    bool is_primary = false;     // carries the default route used for internet traffic
+    bool managed = true;         // false: NM-unmanaged / externally configured
 
-    bool operator==(const WiFiAccessPoint& other) const = default;
+    bool operator==(const NetDevice&) const = default;
 };
 
-struct NetworkStatus {
-    bool is_online = false;
-    ConnectionType active_type = ConnectionType::None;
-    ConnectionState state = ConnectionState::Disconnected;
-    std::string connection_name;
-    std::string ip_address;
-    std::string gateway;
-    std::string dns;
-    std::string mac_address;
+struct ActiveConnection {
+    std::string id;     // NM active-connection path; Windows: interface LUID
+    std::string name;   // profile name ("Wired connection 1", SSID, VPN name)
+    std::string uuid;   // NM connection uuid ("" on Windows)
+    LinkType type = LinkType::Unknown;
+    LinkState state = LinkState::Unknown;
+    std::vector<std::string> device_ids;
+    bool default4 = false;
+    bool default6 = false;
 
-    bool operator==(const NetworkStatus& other) const = default;
+    bool operator==(const ActiveConnection&) const = default;
 };
 
-class BROSYS_API NetworkManager {
+enum class WifiSecurity { Unknown, Open, Wep, WpaPersonal, Wpa2Personal, Wpa3Personal, WpaEnterprise, Wpa2Enterprise, Wpa3Enterprise, Owe };
+
+struct WifiAccessPoint {
+    std::string device_id;  // the Wi-Fi device that sees it
+    std::string ssid;       // raw SSID bytes (usually UTF-8); "" for hidden
+    std::string bssid;      // "aa:bb:cc:dd:ee:ff"
+    uint8_t strength_percent = 0;
+    std::optional<int32_t> rssi_dbm;
+    uint32_t frequency_mhz = 0;
+    uint32_t channel = 0;
+    WifiSecurity security = WifiSecurity::Unknown;
+    bool active = false;    // the device is associated with this BSS
+
+    bool operator==(const WifiAccessPoint&) const = default;
+};
+
+struct NetworkState {
+    Connectivity connectivity = Connectivity::Unknown;
+    bool networking_enabled = true;
+    bool wifi_enabled = false;           // software switch
+    bool wifi_hardware_enabled = false;  // rfkill / hardware switch
+    std::string primary_device;          // NetDevice::id or ""
+    std::vector<NetDevice> devices;
+    std::vector<ActiveConnection> active_connections;
+
+    const NetDevice* primary() const {
+        for (auto& d : devices)
+            if (d.id == primary_device) return &d;
+        return nullptr;
+    }
+    bool operator==(const NetworkState&) const = default;
+};
+
+// ---------------------------------------------------------------- events
+
+// New snapshot after anything in NetworkState changed. Pushed once at start.
+struct NetworkChanged {
+    NetworkState state;
+};
+
+// A scan requested with request_wifi_scan() finished (or the OS finished a
+// scan of its own); `access_points` is the device's full current list.
+struct WifiScanCompleted {
+    std::string device_id;
+    bool ok = true;
+    std::string error;
+    std::vector<WifiAccessPoint> access_points;
+};
+
+using NetworkEvent = std::variant<NetworkChanged, WifiScanCompleted>;
+using NetworkEventQueue = MessageQueue<NetworkEvent>;
+
+struct NetworkConfig {
+    // Linux: system-bus address override; empty = the default system bus.
+    std::string system_bus_address;
+    uint32_t scan_timeout_ms = 15000;  // a scan that has not completed by then reports ok=false
+};
+
+class NetworkService {
 public:
-    using NetworkChangeCallback = std::function<void(const NetworkStatus&)>;
-    using WiFiScanCallback = std::function<void(const std::vector<WiFiAccessPoint>&)>;
+    static std::unique_ptr<NetworkService> create(const NetworkConfig& config, std::string* error);
+    virtual ~NetworkService() = default;
 
-    NetworkManager();
-    ~NetworkManager();
+    virtual NetworkEventQueue& events() = 0;
+    virtual NetworkState state() const = 0;
 
-    NetworkManager(const NetworkManager&) = delete;
-    NetworkManager& operator=(const NetworkManager&) = delete;
-    NetworkManager(NetworkManager&&) noexcept;
-    NetworkManager& operator=(NetworkManager&&) noexcept;
+    // The device's last known access points ("" = all Wi-Fi devices).
+    virtual std::vector<WifiAccessPoint> access_points(const std::string& device_id) const = 0;
 
-    [[nodiscard]] NetworkStatus get_status() const;
-    [[nodiscard]] bool is_wifi_available() const;
-    [[nodiscard]] std::vector<WiFiAccessPoint> scan_wifi() const;
-    void scan_wifi_async(WiFiScanCallback cb);
-
-    void register_status_callback(NetworkChangeCallback cb);
-
-    // Mocking / simulation support
-    void set_mock_status(const NetworkStatus& status);
-    void set_mock_wifi_networks(const std::vector<WiFiAccessPoint>& aps);
-    void clear_mock_network();
-    [[nodiscard]] bool is_mocked() const;
-
-private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
+    // Starts a scan ("" = every Wi-Fi device). Returns once the request is
+    // accepted; each device reports a WifiScanCompleted when the scan ends.
+    virtual Result request_wifi_scan(const std::string& device_id) = 0;
 };
 
-namespace network {
-    BROSYS_API NetworkStatus get_status();
-    BROSYS_API bool is_wifi_available();
-    BROSYS_API std::vector<WiFiAccessPoint> scan_wifi();
-} // namespace network
+const char* to_string(Connectivity c);
+const char* to_string(LinkType t);
+const char* to_string(LinkState s);
+const char* to_string(WifiSecurity s);
 
-} // namespace brosys
+}  // namespace brosys

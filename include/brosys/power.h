@@ -1,97 +1,177 @@
+// Power: batteries / UPS / peripheral batteries, the system power source,
+// session actions (suspend, hibernate, reboot, power off, lock) and
+// inhibitors.
+//
+// Linux: UPower (devices, on-battery, lid) and logind (CanX / actions /
+// inhibitors / PrepareForSleep / PrepareForShutdown), on the system bus.
+// Windows: GetSystemPowerStatus + the battery device class (IOCTL_BATTERY_*),
+// powrprof capabilities, power requests, and power broadcasts.
 #pragma once
 
-#include "brosys/export.h"
+#include "brosys/common.h"
+#include "brosys/event_queue.h"
 
-#include <functional>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
+#include <variant>
+#include <vector>
 
 namespace brosys {
 
-enum class PowerSource {
-    Unknown = 0,
-    Battery = 1,
-    AC = 2
-};
+enum class PowerSource { Unknown, AC, Battery };
+
+// What a power device is. Only devices that power the system
+// (`power_supply`) feed PowerState::source; peripherals are informational.
+enum class PowerDeviceKind { Battery, Ups, Mouse, Keyboard, Headset, Phone, Tablet, Gamepad, Other };
 
 enum class BatteryState {
-    Unknown = 0,
-    Charging = 1,
-    Discharging = 2,
-    NotCharging = 3,
-    Full = 4
+    Unknown,
+    Charging,
+    Discharging,
+    Empty,
+    FullyCharged,
+    PendingCharge,     // on AC, not charging yet (charge threshold, warming up)
+    PendingDischarge,
 };
 
-struct BatteryInfo {
-    bool has_battery = false;
-    PowerSource source = PowerSource::Unknown;
+enum class BatteryTechnology { Unknown, LithiumIon, LithiumPolymer, LithiumIronPhosphate, LeadAcid, NickelCadmium, NickelMetalHydride };
+
+struct PowerDevice {
+    std::string id;                 // stable per boot (UPower object path / battery device path)
+    PowerDeviceKind kind = PowerDeviceKind::Battery;
+    bool power_supply = false;      // powers the whole system (laptop battery, UPS)
     BatteryState state = BatteryState::Unknown;
-    float percentage = -1.0f; // 0.0f - 100.0f, or -1.0f if unknown
-    int estimated_seconds_remaining = -1; // -1 if unknown
-    int time_to_empty_seconds = -1;
-    int time_to_full_seconds = -1;
-    float energy_rate_watts = 0.0f;
+    BatteryTechnology technology = BatteryTechnology::Unknown;
+    std::optional<double> percent;  // 0..100
+    std::optional<int64_t> time_to_empty_s;
+    std::optional<int64_t> time_to_full_s;
+    std::optional<double> energy_wh;
+    std::optional<double> energy_full_wh;
+    std::optional<double> energy_full_design_wh;
+    std::optional<double> energy_rate_w;  // magnitude of charge / discharge rate
+    std::string vendor;
     std::string model;
-    std::string technology;
+    std::string serial;
 
-    bool operator==(const BatteryInfo& other) const = default;
+    bool operator==(const PowerDevice&) const = default;
 };
 
-class BROSYS_API PowerManager {
+struct PowerState {
+    PowerSource source = PowerSource::Unknown;
+    std::vector<PowerDevice> devices;  // real devices only: no aggregate "display device", no line-power entries
+    std::optional<double> percent;     // aggregate over power_supply batteries, when any exist
+    std::optional<int64_t> time_to_empty_s;
+    std::optional<int64_t> time_to_full_s;
+    bool lid_present = false;
+    bool lid_closed = false;
+
+    bool has_system_battery() const {
+        for (auto& d : devices)
+            if (d.power_supply && d.kind == PowerDeviceKind::Battery) return true;
+        return false;
+    }
+    bool operator==(const PowerState&) const = default;
+};
+
+enum class PowerAction { Suspend, Hibernate, HybridSleep, Reboot, PowerOff, Lock };
+
+struct PowerCapabilities {
+    Availability suspend = Availability::Unknown;
+    Availability hibernate = Availability::Unknown;
+    Availability hybrid_sleep = Availability::Unknown;
+    Availability reboot = Availability::Unknown;
+    Availability power_off = Availability::Unknown;
+    Availability lock = Availability::Unknown;
+
+    Availability of(PowerAction a) const;
+    bool operator==(const PowerCapabilities&) const = default;
+};
+
+// Bits for InhibitRequest::what.
+namespace inhibit {
+inline constexpr uint32_t Sleep = 1u << 0;      // suspend / hibernate
+inline constexpr uint32_t Idle = 1u << 1;       // idle actions and display sleep
+inline constexpr uint32_t Shutdown = 1u << 2;   // power off / reboot
+inline constexpr uint32_t LidSwitch = 1u << 3;  // logind handle-lid-switch (Linux only)
+inline constexpr uint32_t PowerKey = 1u << 4;   // logind handle-power-key (Linux only)
+}  // namespace inhibit
+
+enum class InhibitMode { Block, Delay };
+
+struct InhibitRequest {
+    uint32_t what = inhibit::Idle;
+    std::string who;   // application name
+    std::string why;   // human-readable reason
+    InhibitMode mode = InhibitMode::Block;
+};
+
+// Held for as long as it lives; destroying it releases the inhibition.
+class Inhibitor {
 public:
-    using BatteryCallback = std::function<void(const BatteryInfo&)>;
-
-    PowerManager();
-    ~PowerManager();
-
-    PowerManager(const PowerManager&) = delete;
-    PowerManager& operator=(const PowerManager&) = delete;
-    PowerManager(PowerManager&&) noexcept;
-    PowerManager& operator=(PowerManager&&) noexcept;
-
-    [[nodiscard]] BatteryInfo get_battery_info() const;
-
-    [[nodiscard]] bool can_suspend() const;
-    [[nodiscard]] bool can_hibernate() const;
-    [[nodiscard]] bool can_reboot() const;
-    [[nodiscard]] bool can_power_off() const;
-    [[nodiscard]] bool can_lock() const;
-
-    bool suspend(bool dry_run = false);
-    bool hibernate(bool dry_run = false);
-    bool reboot(bool dry_run = false);
-    bool power_off(bool dry_run = false);
-    bool lock(bool dry_run = false);
-
-    void register_battery_callback(BatteryCallback cb);
-    void start_monitoring(int interval_ms = 2000);
-    void stop_monitoring();
-    [[nodiscard]] bool is_monitoring() const;
-
-    // Testing / simulation support
-    void set_mock_battery(const BatteryInfo& info);
-    void clear_mock_battery();
-    [[nodiscard]] bool is_mocked() const;
-
-private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
+    virtual ~Inhibitor() = default;
 };
 
-// Convenience free functions
-namespace power {
-    BROSYS_API BatteryInfo get_battery_info();
-    BROSYS_API bool can_suspend();
-    BROSYS_API bool can_hibernate();
-    BROSYS_API bool can_reboot();
-    BROSYS_API bool can_power_off();
-    BROSYS_API bool can_lock();
-    BROSYS_API bool suspend(bool dry_run = false);
-    BROSYS_API bool hibernate(bool dry_run = false);
-    BROSYS_API bool reboot(bool dry_run = false);
-    BROSYS_API bool power_off(bool dry_run = false);
-    BROSYS_API bool lock(bool dry_run = false);
-} // namespace power
+// ---------------------------------------------------------------- events
 
-} // namespace brosys
+// New snapshot after any change (device added/removed/changed, AC plugged,
+// lid). Pushed once at start too.
+struct PowerChanged {
+    PowerState state;
+};
+
+struct PowerCapabilitiesChanged {
+    PowerCapabilities capabilities;
+};
+
+// The system is about to sleep (`starting` true) or has resumed (false).
+// A host holding a Delay inhibitor should finish its work and release it.
+struct SleepPrepare {
+    bool starting = true;
+};
+
+// The system is about to shut down / reboot (`starting` true) or the
+// shutdown was cancelled (false).
+struct ShutdownPrepare {
+    bool starting = true;
+};
+
+using PowerEvent = std::variant<PowerChanged, PowerCapabilitiesChanged, SleepPrepare, ShutdownPrepare>;
+using PowerEventQueue = MessageQueue<PowerEvent>;
+
+struct PowerConfig {
+    // Linux: system-bus address override (tests point it at a private bus
+    // running a real upowerd); empty = the default system bus.
+    std::string system_bus_address;
+    // Polling interval for backends that have no change notification for a
+    // value (Windows battery rate / time estimates). 0 disables polling.
+    uint32_t poll_interval_ms = 10000;
+};
+
+class PowerService {
+public:
+    // Starts the backend thread; the first PowerChanged is queued before
+    // create() returns. nullptr + *error when the platform service is absent.
+    static std::unique_ptr<PowerService> create(const PowerConfig& config, std::string* error);
+    virtual ~PowerService() = default;
+
+    virtual PowerEventQueue& events() = 0;
+
+    virtual PowerState state() const = 0;                // latest snapshot
+    virtual PowerCapabilities capabilities() const = 0;  // latest snapshot
+
+    // Performs the action (never on dry runs: callers check capabilities()).
+    // Linux requests are interactive (polkit may prompt).
+    virtual Result request(PowerAction action) = 0;
+
+    virtual std::unique_ptr<Inhibitor> inhibit(const InhibitRequest& request, std::string* error) = 0;
+};
+
+const char* to_string(PowerSource s);
+const char* to_string(PowerDeviceKind k);
+const char* to_string(BatteryState s);
+const char* to_string(BatteryTechnology t);
+const char* to_string(PowerAction a);
+
+}  // namespace brosys

@@ -1,111 +1,151 @@
+// Notifications: the desktop notification server. Other processes post
+// notifications; the host renders them and reports user interaction back.
+//
+// Linux: owns org.freedesktop.Notifications on the session bus and
+// implements the Desktop Notifications Specification 1.2 completely: Notify
+// (replaces_id, actions, hints, expire_timeout), CloseNotification,
+// GetCapabilities, GetServerInformation, the NotificationClosed /
+// ActionInvoked / ActivationToken signals.
+// Windows: notifications reach a process only when it is the shell. In shell
+// mode the tray host's balloon notifications (Shell_NotifyIcon NIF_INFO)
+// become notifications here and interaction is reported back to the icon
+// (NIN_BALLOONUSERCLICK / NIN_BALLOONTIMEOUT / NIN_BALLOONHIDE). Alongside
+// Explorer only notifications the host posts itself are seen;
+// capabilities() says which.
 #pragma once
 
-#include "brosys/export.h"
+#include "brosys/common.h"
+#include "brosys/event_queue.h"
 
+#include <chrono>
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
-#include <unordered_map>
+#include <utility>
+#include <variant>
 #include <vector>
 
 namespace brosys {
 
-enum class NotificationUrgency {
-    Low = 0,
-    Normal = 1,
-    Critical = 2
-};
+class TrayHost;
 
-enum class CloseReason {
-    Expired = 1,
-    DismissedByUser = 2,
-    ClosedByCall = 3,
-    Undefined = 4
+enum class Urgency : uint8_t { Low = 0, Normal = 1, Critical = 2 };
+
+// Values are the specification's NotificationClosed reason codes.
+enum class CloseReason : uint32_t {
+    Expired = 1,    // the timeout passed
+    Dismissed = 2,  // the user dismissed it
+    Closed = 3,     // CloseNotification (the sender) or the host closed it
+    Undefined = 4,
 };
 
 struct NotificationAction {
-    std::string key;
-    std::string label;
-
-    bool operator==(const NotificationAction& other) const = default;
+    std::string key;    // "default" is the action for clicking the notification itself
+    std::string label;  // with action-icons: an icon name
+    bool operator==(const NotificationAction&) const = default;
 };
 
-struct NotificationImage {
-    int width = 0;
-    int height = 0;
-    int rowstride = 0;
-    bool has_alpha = true;
-    int bits_per_sample = 8;
-    int channels = 4;
-    std::vector<uint8_t> data;
-
-    bool operator==(const NotificationImage& other) const = default;
-};
-
-struct NotificationItem {
-    uint32_t id = 0;
+struct Notification {
+    uint32_t id = 0;                // never 0 for a posted notification
     std::string app_name;
+    std::string app_icon;           // icon name or file:// URI
     std::string summary;
-    std::string body;
-    std::string icon_name;
-    NotificationImage icon_image;
+    std::string body;               // may contain the spec's markup subset when "body-markup" is advertised
     std::vector<NotificationAction> actions;
-    std::unordered_map<std::string, std::string> hints;
-    int timeout_ms = -1; // -1 = default, 0 = never expire
-    NotificationUrgency urgency = NotificationUrgency::Normal;
-    uint64_t timestamp_ms = 0;
 
-    bool operator==(const NotificationItem& other) const = default;
+    // Standard hints.
+    Urgency urgency = Urgency::Normal;
+    std::string category;           // "email.arrived", ...
+    std::string desktop_entry;      // "org.gnome.Evolution"
+    std::optional<Image> image;     // image-data / image_data / icon_data (in that precedence)
+    std::string image_path;         // image-path / image_path
+    std::string sound_file;
+    std::string sound_name;
+    bool suppress_sound = false;
+    bool transient = false;
+    bool resident = false;
+    bool action_icons = false;
+    std::optional<int32_t> x;
+    std::optional<int32_t> y;
+    // Every other hint, rendered as text (GVariant-like) for the host to inspect.
+    std::vector<std::pair<std::string, std::string>> other_hints;
+
+    int32_t expire_timeout_ms = -1;  // as requested: -1 server default, 0 never
+    // When the server will close it with CloseReason::Expired (nullopt = never).
+    std::optional<std::chrono::steady_clock::time_point> expires_at;
+
+    std::string sender;             // unique bus name (Linux), "hwnd:uid" of the icon (Windows), "local"
+    uint32_t sender_pid = 0;
+
+    bool operator==(const Notification&) const = default;
 };
 
-struct ServerInfo {
-    std::string name;
-    std::string vendor;
-    std::string version;
-    std::string spec_version;
+// ---------------------------------------------------------------- events
 
-    bool operator==(const ServerInfo& other) const = default;
+// A new notification, or `replaced` = an existing id was updated in place
+// (replaces_id / NIM_MODIFY); the host should update the existing popup.
+struct NotificationPosted {
+    Notification notification;
+    bool replaced = false;
 };
 
-class BROSYS_API NotificationServer {
+// The notification is gone, whoever closed it (sender, host, expiry).
+struct NotificationClosed {
+    uint32_t id = 0;
+    CloseReason reason = CloseReason::Undefined;
+};
+
+// Lost (or regained) ownership of the service name; while lost the server
+// receives nothing.
+struct NotificationServerStatus {
+    bool active = false;
+    std::string detail;
+};
+
+using NotificationEvent = std::variant<NotificationPosted, NotificationClosed, NotificationServerStatus>;
+using NotificationEventQueue = MessageQueue<NotificationEvent>;
+
+struct NotificationServerConfig {
+    std::string name = "brosys";    // GetServerInformation
+    std::string vendor = "bro";
+    std::string version = "0.2";
+    // GetCapabilities. Advertise only what the host actually renders.
+    std::vector<std::string> capabilities{"actions", "body", "body-markup", "icon-static", "persistence"};
+    int32_t default_timeout_ms = 5000;  // used for expire_timeout == -1 (critical never expires)
+    // Linux: replace an existing owner of org.freedesktop.Notifications if it
+    // allows replacement; otherwise queue for the name.
+    bool replace_existing = false;
+    std::string session_bus_address;   // Linux: override (tests use a private bus); empty = default
+    TrayHost* balloon_source = nullptr; // Windows: balloons of this (shell-mode) tray host become notifications
+};
+
+struct NotificationServerCapabilities {
+    bool receives_foreign = false;  // other processes' notifications reach this server
+    std::string source;             // "org.freedesktop.Notifications", "Shell_NotifyIcon balloons", "local only"
+    std::string detail;             // why, when receives_foreign is false
+};
+
+class NotificationServer {
 public:
-    using NotificationReceivedCallback = std::function<void(const NotificationItem&)>;
-    using ActionInvokedCallback = std::function<void(uint32_t id, const std::string& action_key)>;
-    using NotificationClosedCallback = std::function<void(uint32_t id, CloseReason reason)>;
+    static std::unique_ptr<NotificationServer> create(const NotificationServerConfig& config, std::string* error);
+    virtual ~NotificationServer() = default;
 
-    NotificationServer();
-    ~NotificationServer();
+    virtual NotificationEventQueue& events() = 0;
+    virtual NotificationServerCapabilities capabilities() const = 0;
+    virtual std::vector<Notification> active() const = 0;
 
-    NotificationServer(const NotificationServer&) = delete;
-    NotificationServer& operator=(const NotificationServer&) = delete;
-    NotificationServer(NotificationServer&&) noexcept;
-    NotificationServer& operator=(NotificationServer&&) noexcept;
-
-    bool start();
-    void stop();
-    [[nodiscard]] bool is_running() const;
-
-    uint32_t post_notification(const NotificationItem& item);
-    bool close_notification(uint32_t id, CloseReason reason = CloseReason::ClosedByCall);
-    bool invoke_action(uint32_t id, const std::string& action_key);
-
-    [[nodiscard]] std::vector<NotificationItem> get_active_notifications() const;
-    [[nodiscard]] std::optional<NotificationItem> get_notification(uint32_t id) const;
-    [[nodiscard]] size_t active_count() const;
-    void clear_all();
-
-    [[nodiscard]] std::vector<std::string> get_capabilities() const;
-    [[nodiscard]] ServerInfo get_server_info() const;
-
-    void set_notification_received_callback(NotificationReceivedCallback cb);
-    void set_action_invoked_callback(ActionInvokedCallback cb);
-    void set_notification_closed_callback(NotificationClosedCallback cb);
-
-private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
+    // The user clicked an action (or "default"). Emits ActionInvoked (+
+    // ActivationToken when given, before it); a non-resident notification is
+    // then closed with Dismissed.
+    virtual Result invoke_action(uint32_t id, const std::string& action_key, const std::string& activation_token) = 0;
+    // The host closed it: Dismissed (user), Expired (host-managed timeout), ...
+    virtual Result close(uint32_t id, CloseReason reason) = 0;
+    // Shows the host's own notification through the same path; returns its id (0 on failure).
+    virtual uint32_t post(const Notification& notification) = 0;
 };
 
-} // namespace brosys
+const char* to_string(CloseReason r);
+const char* to_string(Urgency u);
+
+}  // namespace brosys

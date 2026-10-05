@@ -1,112 +1,183 @@
+// Tray: the status-notifier area. Other processes publish items; the host
+// renders them (icons, tooltips, menus) and sends interaction back.
+//
+// Linux: StatusNotifierWatcher (org.kde.StatusNotifierWatcher) + a
+// StatusNotifierHost. Items' properties are tracked through their New*
+// signals; menus (com.canonical.dbusmenu) are fetched as data the host
+// renders, and clicks are sent back as dbusmenu Events. When another
+// process already owns the watcher name, this host registers with it
+// instead (role WatcherClient) and still sees every item.
+// Windows: real tray hosting needs the process to be the shell: it must own
+// the Shell_TrayWnd window that Shell_NotifyIcon talks to (WM_COPYDATA). In
+// shell mode this host creates it on its own thread's desktop and receives
+// every NIM_* call; alongside Explorer that window belongs to Explorer and
+// nothing can be hosted (role None, reason in capabilities()).
 #pragma once
 
-#include "brosys/export.h"
+#include "brosys/common.h"
+#include "brosys/event_queue.h"
 
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace brosys {
 
-enum class ItemStatus {
-    Passive = 0,
-    Active = 1,
-    NeedsAttention = 2
+enum class TrayItemStatus { Passive, Active, NeedsAttention };
+enum class TrayCategory { ApplicationStatus, Communications, SystemServices, Hardware };
+
+struct TrayIcon {
+    std::string name;            // icon-theme name ("" when only pixmaps)
+    std::string theme_path;      // extra theme search path (SNI IconThemePath)
+    std::vector<Image> pixmaps;  // one or more sizes (Windows: the HICON's pixels)
+
+    bool empty() const { return name.empty() && pixmaps.empty(); }
+    bool operator==(const TrayIcon&) const = default;
 };
 
-enum class ItemCategory {
-    ApplicationStatus = 0,
-    Communications = 1,
-    SystemServices = 2,
-    Hardware = 3,
-    Other = 4
+struct TrayToolTip {
+    TrayIcon icon;
+    std::string title;
+    std::string body;  // may contain markup on Linux
+    bool operator==(const TrayToolTip&) const = default;
 };
 
-struct TrayIconPixmap {
-    int width = 0;
-    int height = 0;
-    std::vector<uint8_t> rgba;
+enum class MenuToggle { None, Checkmark, Radio };
 
-    bool operator==(const TrayIconPixmap& other) const = default;
-};
-
-struct TrayMenuItem {
-    int id = 0;
-    std::string label;
+// One com.canonical.dbusmenu node (Linux). id 0 is the root.
+struct MenuItem {
+    int32_t id = 0;
+    bool separator = false;
+    std::string label;  // mnemonic underscores kept ("_Quit"); "__" is a literal underscore
     bool enabled = true;
     bool visible = true;
-    bool is_separator = false;
-    bool is_check = false;
-    bool checked = false;
     std::string icon_name;
-    std::vector<TrayMenuItem> children;
+    std::vector<uint8_t> icon_png;  // dbusmenu icon-data: PNG bytes, undecoded
+    MenuToggle toggle = MenuToggle::None;
+    int32_t toggle_state = -1;  // 0 off, 1 on, -1 indeterminate
+    std::vector<std::vector<std::string>> shortcut;  // [["Control", "q"]]
+    bool has_submenu = false;   // children-display == "submenu"
+    std::vector<MenuItem> children;
 
-    bool operator==(const TrayMenuItem& other) const = default;
+    bool operator==(const MenuItem&) const = default;
 };
 
-struct StatusNotifierItem {
-    std::string id;
-    std::string service_name;
+struct TrayItem {
+    std::string id;       // unique in this host: "<bus name><object path>" (Linux), "hwnd:<hex>:<uid>" or "guid:{...}" (Windows)
+    std::string app_id;   // SNI Id; Windows: executable base name
     std::string title;
-    ItemCategory category = ItemCategory::ApplicationStatus;
-    ItemStatus status = ItemStatus::Active;
-    std::string icon_name;
-    std::vector<TrayIconPixmap> icon_pixmaps;
-    std::string attention_icon_name;
-    std::string tooltip_title;
-    std::string tooltip_body;
-    std::string menu_path;
-    std::vector<TrayMenuItem> menu_items;
+    TrayCategory category = TrayCategory::ApplicationStatus;
+    TrayItemStatus status = TrayItemStatus::Active;
+    TrayIcon icon;
+    TrayIcon overlay_icon;
+    TrayIcon attention_icon;
+    std::string attention_movie;
+    TrayToolTip tooltip;  // Windows: title = szTip
+    bool item_is_menu = false;  // activation should show the menu
+    bool has_menu = false;      // Linux: dbusmenu present (menu() returns it)
+    uint64_t window_id = 0;     // SNI WindowId; Windows: the icon's HWND
+    uint32_t pid = 0;
+    bool hidden = false;        // Windows NIS_HIDDEN
 
-    bool operator==(const StatusNotifierItem& other) const = default;
+    bool operator==(const TrayItem&) const = default;
 };
 
-class BROSYS_API TrayHost {
+// Bits for TrayItemChanged::changes.
+namespace tray_change {
+inline constexpr uint32_t Title = 1u << 0;
+inline constexpr uint32_t Icon = 1u << 1;
+inline constexpr uint32_t AttentionIcon = 1u << 2;
+inline constexpr uint32_t OverlayIcon = 1u << 3;
+inline constexpr uint32_t ToolTip = 1u << 4;
+inline constexpr uint32_t Status = 1u << 5;
+inline constexpr uint32_t Menu = 1u << 6;  // the menu object itself (not its layout)
+inline constexpr uint32_t Other = 1u << 7;
+}  // namespace tray_change
+
+struct TrayItemAdded {
+    TrayItem item;
+};
+struct TrayItemChanged {
+    TrayItem item;
+    uint32_t changes = 0;
+};
+struct TrayItemRemoved {
+    std::string id;
+};
+// The item's menu layout or item properties changed; `root` is the new full menu.
+struct TrayMenuChanged {
+    std::string item_id;
+    MenuItem root;
+};
+
+enum class TrayRole {
+    None,           // hosting nothing (see capabilities().detail)
+    Watcher,        // Linux: owns org.kde.StatusNotifierWatcher (and is a host of it)
+    WatcherClient,  // Linux: another process owns the watcher; registered as a host with it
+    Shell,          // Windows: owns Shell_TrayWnd on this desktop
+};
+
+struct TrayHostStatus {
+    TrayRole role = TrayRole::None;
+    std::string detail;
+};
+
+using TrayEvent = std::variant<TrayItemAdded, TrayItemChanged, TrayItemRemoved, TrayMenuChanged, TrayHostStatus>;
+using TrayEventQueue = MessageQueue<TrayEvent>;
+
+enum class TrayMode {
+    Auto,       // Windows: Shell if no Shell_TrayWnd exists on this desktop, else Alongside
+    Shell,      // Windows: create Shell_TrayWnd; create() fails if another exists
+    Alongside,  // Windows: never claim the tray (role None)
+};
+
+struct TrayConfig {
+    // Linux
+    std::string session_bus_address;   // override (tests use a private bus); empty = default
+    bool become_watcher = true;        // false: only register as a host with an existing watcher
+    // Windows
+    TrayMode mode = TrayMode::Auto;
+    // Shell mode: tell running apps to re-add their icons (RegisterWindowMessage
+    // "TaskbarCreated"), sent to the top-level windows of this desktop.
+    bool announce_taskbar_created = true;
+};
+
+struct Rect32 {
+    int32_t x = 0, y = 0, width = 0, height = 0;
+    bool operator==(const Rect32&) const = default;
+};
+
+enum class ScrollOrientation { Vertical, Horizontal };
+enum class MenuEventType { Clicked, Hovered, Opened, Closed };
+
+class TrayHost {
 public:
-    using ItemAddedCallback = std::function<void(const StatusNotifierItem&)>;
-    using ItemUpdatedCallback = std::function<void(const StatusNotifierItem&)>;
-    using ItemRemovedCallback = std::function<void(const std::string& id)>;
-    using ItemActivatedCallback = std::function<void(const std::string& id, int x, int y)>;
-    using MenuActionCallback = std::function<void(const std::string& id, int action_id)>;
+    static std::unique_ptr<TrayHost> create(const TrayConfig& config, std::string* error);
+    virtual ~TrayHost() = default;
 
-    TrayHost();
-    ~TrayHost();
+    virtual TrayEventQueue& events() = 0;
+    virtual TrayHostStatus status() const = 0;
+    virtual std::vector<TrayItem> items() const = 0;
 
-    TrayHost(const TrayHost&) = delete;
-    TrayHost& operator=(const TrayHost&) = delete;
-    TrayHost(TrayHost&&) noexcept;
-    TrayHost& operator=(TrayHost&&) noexcept;
+    // Interaction. (x, y) are screen coordinates of the pointer / icon.
+    virtual Result activate(const std::string& item_id, int32_t x, int32_t y) = 0;            // primary click
+    virtual Result secondary_activate(const std::string& item_id, int32_t x, int32_t y) = 0;  // middle click
+    virtual Result context_menu(const std::string& item_id, int32_t x, int32_t y) = 0;        // the item shows its own menu
+    virtual Result scroll(const std::string& item_id, int32_t delta, ScrollOrientation orientation) = 0;
 
-    bool start();
-    void stop();
-    [[nodiscard]] bool is_running() const;
+    // Linux dbusmenu: the cached layout, and events sent to it.
+    virtual std::optional<MenuItem> menu(const std::string& item_id) const = 0;
+    virtual Result menu_about_to_show(const std::string& item_id, int32_t menu_item_id) = 0;
+    virtual Result menu_event(const std::string& item_id, int32_t menu_item_id, MenuEventType type) = 0;
 
-    [[nodiscard]] std::vector<StatusNotifierItem> get_items() const;
-    [[nodiscard]] std::optional<StatusNotifierItem> get_item(const std::string& id) const;
-    [[nodiscard]] size_t item_count() const;
-
-    bool register_item(const StatusNotifierItem& item);
-    bool update_item(const StatusNotifierItem& item);
-    bool unregister_item(const std::string& id);
-    void clear();
-
-    bool activate_item(const std::string& id, int x = 0, int y = 0);
-    bool secondary_activate_item(const std::string& id, int x = 0, int y = 0);
-    bool context_menu(const std::string& id, int x = 0, int y = 0);
-    bool trigger_menu_action(const std::string& id, int action_id);
-
-    void set_item_added_callback(ItemAddedCallback cb);
-    void set_item_updated_callback(ItemUpdatedCallback cb);
-    void set_item_removed_callback(ItemRemovedCallback cb);
-    void set_item_activated_callback(ItemActivatedCallback cb);
-    void set_menu_action_callback(MenuActionCallback cb);
-
-private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
+    // Windows: where the host drew the icon (answers Shell_NotifyIconGetRect).
+    virtual Result set_item_rect(const std::string& item_id, const Rect32& rect) = 0;
 };
 
-} // namespace brosys
+const char* to_string(TrayRole r);
+const char* to_string(TrayItemStatus s);
+
+}  // namespace brosys

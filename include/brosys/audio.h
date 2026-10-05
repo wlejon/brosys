@@ -1,94 +1,113 @@
+// Audio: output (sink) and input (source) devices, the default device per
+// direction, volume / mute, and change events.
+//
+// Linux: a PipeWire client (audio Sink / Source nodes, the "default"
+// metadata, device Route volumes the way wpctl / pactl set them).
+// Windows: Core Audio (IMMDeviceEnumerator, IMMNotificationClient,
+// IAudioEndpointVolume + IAudioEndpointVolumeCallback).
+//
+// Volume is the value the OS mixer UI shows: the endpoint scalar on Windows,
+// the cubic ("wpctl" / pactl percent) volume on PipeWire. 1.0 is 100 %;
+// PipeWire allows over-amplification (> 1.0) up to AudioConfig::max_volume.
 #pragma once
 
-#include "brosys/export.h"
+#include "brosys/common.h"
+#include "brosys/event_queue.h"
 
-#include <functional>
+#include <cstdint>
 #include <memory>
-#include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace brosys {
 
-enum class EndpointDirection {
-    Output = 0, // Speakers, Headphones, HDMI
-    Input = 1   // Microphones, Line-in
-};
+enum class AudioDirection { Output, Input };
 
-struct AudioEndpoint {
-    std::string id;
-    std::string name;
-    std::string description;
-    EndpointDirection direction = EndpointDirection::Output;
+enum class AudioDeviceState { Active, Unplugged, Disabled, NotPresent };
+
+struct AudioDevice {
+    std::string id;           // stable: endpoint id string (Windows), node.name (PipeWire)
+    std::string description;  // human name: "Speakers (Realtek(R) Audio)", node.description
+    std::string device_name;  // the card / adapter: "Realtek(R) Audio", device.description
+    std::string form_factor;  // speakers, headphones, headset, hdmi, microphone, ... ("" unknown)
+    AudioDirection direction = AudioDirection::Output;
+    AudioDeviceState state = AudioDeviceState::Active;
     bool is_default = false;
-    float volume = 0.0f; // 0.0f - 1.0f
-    bool is_muted = false;
-    std::vector<std::string> supported_formats;
+    bool has_volume = true;      // the device exposes a volume control
+    float volume = 0.0f;         // UI scale, see top of file
+    std::vector<float> channel_volumes;  // same scale, per channel (empty when unknown)
+    bool muted = false;
+    uint32_t native_id = 0;      // PipeWire global id (0 on Windows); informational
 
-    bool operator==(const AudioEndpoint& other) const = default;
+    bool operator==(const AudioDevice&) const = default;
 };
 
-struct VolumeNotification {
-    std::string endpoint_id;
-    EndpointDirection direction = EndpointDirection::Output;
-    float volume = 0.0f;
-    bool is_muted = false;
+struct AudioState {
+    std::vector<AudioDevice> devices;  // active devices of both directions
+    std::string default_output;        // id, "" when none
+    std::string default_input;
 
-    bool operator==(const VolumeNotification& other) const = default;
+    bool operator==(const AudioState&) const = default;
 };
 
-class BROSYS_API AudioManager {
+// Bits for AudioDeviceChanged::changes.
+namespace audio_change {
+inline constexpr uint32_t Volume = 1u << 0;
+inline constexpr uint32_t Mute = 1u << 1;
+inline constexpr uint32_t Description = 1u << 2;
+inline constexpr uint32_t State = 1u << 3;
+inline constexpr uint32_t Default = 1u << 4;
+}  // namespace audio_change
+
+struct AudioDeviceAdded {
+    AudioDevice device;
+};
+struct AudioDeviceRemoved {
+    std::string id;
+    AudioDirection direction = AudioDirection::Output;
+};
+struct AudioDeviceChanged {
+    AudioDevice device;
+    uint32_t changes = 0;
+};
+// The default device of a direction changed ("" = there is none now).
+struct AudioDefaultChanged {
+    AudioDirection direction = AudioDirection::Output;
+    std::string id;
+};
+
+using AudioEvent = std::variant<AudioDeviceAdded, AudioDeviceRemoved, AudioDeviceChanged, AudioDefaultChanged>;
+using AudioEventQueue = MessageQueue<AudioEvent>;
+
+struct AudioConfig {
+    // Linux: PipeWire remote name (PIPEWIRE_REMOTE semantics); empty = the
+    // default ("pipewire-0" in $XDG_RUNTIME_DIR).
+    std::string pipewire_remote;
+    float max_volume = 1.5f;  // clamp for set_volume (Windows always clamps to 1.0)
+};
+
+class AudioService {
 public:
-    using VolumeCallback = std::function<void(const VolumeNotification&)>;
-    using EndpointListCallback = std::function<void(EndpointDirection direction)>;
+    // Connects and takes an initial snapshot. One AudioDeviceAdded per
+    // device and one AudioDefaultChanged per direction are queued before
+    // create() returns, so a host can build its model from events alone.
+    static std::unique_ptr<AudioService> create(const AudioConfig& config, std::string* error);
+    virtual ~AudioService() = default;
 
-    AudioManager();
-    ~AudioManager();
+    virtual AudioEventQueue& events() = 0;
+    virtual AudioState state() const = 0;
 
-    AudioManager(const AudioManager&) = delete;
-    AudioManager& operator=(const AudioManager&) = delete;
-    AudioManager(AudioManager&&) noexcept;
-    AudioManager& operator=(AudioManager&&) noexcept;
-
-    // Master volume & mute
-    [[nodiscard]] float get_master_volume() const;
-    bool set_master_volume(float volume);
-    [[nodiscard]] bool is_master_muted() const;
-    bool set_master_mute(bool mute);
-    bool toggle_master_mute();
-
-    // Endpoints
-    [[nodiscard]] std::vector<AudioEndpoint> get_output_endpoints() const;
-    [[nodiscard]] std::vector<AudioEndpoint> get_input_endpoints() const;
-    [[nodiscard]] std::optional<AudioEndpoint> get_default_output() const;
-    [[nodiscard]] std::optional<AudioEndpoint> get_default_input() const;
-
-    bool set_endpoint_volume(const std::string& endpoint_id, float volume);
-    bool set_endpoint_mute(const std::string& endpoint_id, bool mute);
-
-    // Callbacks
-    void register_volume_callback(VolumeCallback cb);
-    void register_endpoint_callback(EndpointListCallback cb);
-
-    // Mocking / headless support
-    void set_mock_endpoints(const std::vector<AudioEndpoint>& outputs,
-                            const std::vector<AudioEndpoint>& inputs);
-    void clear_mock_endpoints();
-    [[nodiscard]] bool is_mocked() const;
-
-private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
+    // Mutations. Completion is observed as AudioDeviceChanged /
+    // AudioDefaultChanged events.
+    virtual Result set_volume(const std::string& id, float volume) = 0;  // all channels
+    virtual Result set_mute(const std::string& id, bool muted) = 0;
+    // Windows uses the undocumented-but-stable IPolicyConfig interface the
+    // Sound control panel uses; PipeWire sets default.configured.audio.*.
+    virtual Result set_default(const std::string& id) = 0;
 };
 
-namespace audio {
-    BROSYS_API float get_master_volume();
-    BROSYS_API bool set_master_volume(float volume);
-    BROSYS_API bool is_master_muted();
-    BROSYS_API bool set_master_mute(bool mute);
-    BROSYS_API bool toggle_master_mute();
-    BROSYS_API std::vector<AudioEndpoint> get_output_endpoints();
-    BROSYS_API std::vector<AudioEndpoint> get_input_endpoints();
-} // namespace audio
+const char* to_string(AudioDirection d);
+const char* to_string(AudioDeviceState s);
 
-} // namespace brosys
+}  // namespace brosys

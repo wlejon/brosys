@@ -1,18 +1,30 @@
-set(TESTS
-    test_smoke
-    test_power
-    test_audio
-    test_network
-    test_notifications
-    test_tray
-)
+# brosys_test(<name> SOURCES ... [LIBS ...]): one real ctest. Exit code 77
+# is a skip (a service genuinely absent), anything else nonzero a failure.
+function(brosys_test name)
+    cmake_parse_arguments(T "" "TIMEOUT" "SOURCES;LIBS" ${ARGN})
+    add_executable(${name} ${T_SOURCES})
+    target_link_libraries(${name} PRIVATE brosys ${T_LIBS})
+    target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/src)
+    brosys_warnings(${name})
+    if(WIN32)
+        target_compile_definitions(${name} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE _WIN32_WINNT=0x0A00)
+    endif()
+    if(NOT T_TIMEOUT)
+        set(T_TIMEOUT 120)
+    endif()
+    add_test(NAME ${name} COMMAND ${name})
+    set_tests_properties(${name} PROPERTIES TIMEOUT ${T_TIMEOUT} SKIP_RETURN_CODE 77)
+endfunction()
 
-foreach(test_name IN LISTS TESTS)
-    add_executable(${test_name} "${test_name}.cpp")
-    target_link_libraries(${test_name} PRIVATE brosys)
-    target_include_directories(${test_name} PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/../include"
-        "${CMAKE_CURRENT_SOURCE_DIR}"
-    )
-    add_test(NAME ${test_name} COMMAND ${test_name})
+brosys_test(test_event_queue SOURCES common/test_event_queue.cpp)
+
+# Per-area fragments (each owns its own tests and helper executables).
+foreach(fragment
+        win/system.cmake win/shell.cmake
+        linux/dbus.cmake linux/desktop.cmake linux/system.cmake)
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${fragment})
+        if((fragment MATCHES "^win/" AND WIN32) OR (fragment MATCHES "^linux/" AND CMAKE_SYSTEM_NAME STREQUAL "Linux"))
+            include(${CMAKE_CURRENT_SOURCE_DIR}/${fragment})
+        endif()
+    endif()
 endforeach()
