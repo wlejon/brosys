@@ -162,7 +162,10 @@ void test_bluetooth_system() {
     std::string err;
     auto service = BluetoothService::create(cfg, &err);
     if (!service) {
-        bstest::skip("test_bluetooth (system)", err);
+        // The scripted-BlueZ half above has already run and counted; a skip
+        // here would hide its failures, so the system half just says why.
+        std::printf("[test_bluetooth] system BlueZ part not run: %s\n", err.c_str());
+        return;
     }
     // If BlueZ is running on system bus, verify basic querying works
     auto adapters = service->adapters();

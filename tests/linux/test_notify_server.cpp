@@ -73,12 +73,20 @@ void test_notify_send(const bstest::PrivateBus& bus) {
     CHECK(server->capabilities().receives_foreign);
     CHECK_EQ(server->capabilities().source, std::string(kDest));
 
-    auto r = run({"notify-send", "-p", "-a", "Mail App", "-i", "mail-unread", "-n", "mail-unread", "-u", "critical", "-c", "email.arrived",
-                  "-e", "-t", "0", "-h", "string:desktop-entry:org.test.Mail", "-h", "int:x:5", "-h", "int:y:6",
-                  "-h", "boolean:resident:true", "-h", "boolean:suppress-sound:true",
-                  "-h", "string:sound-name:message-new-email", "-h", "string:image-path:/tmp/pic.png",
-                  "-h", "string:x-custom:hello", "Summary one", "Body <b>bold</b>"},
-                 bus.env());
+    // Newer libnotify sends the app icon only with -n/--app-icon (-i is the
+    // notification's icon); older notify-send (Ubuntu 24.04's 0.8.3) has no -n
+    // and sends -i as the app icon.
+    std::vector<std::string> argv{"notify-send", "-p", "-a", "Mail App", "-i", "mail-unread"};
+    if (run({"notify-send", "--help"}).out.find("--app-icon") != std::string::npos) {
+        argv.insert(argv.end(), {"-n", "mail-unread"});
+    }
+    argv.insert(argv.end(),
+                {"-u", "critical", "-c", "email.arrived",
+                 "-e", "-t", "0", "-h", "string:desktop-entry:org.test.Mail", "-h", "int:x:5", "-h", "int:y:6",
+                 "-h", "boolean:resident:true", "-h", "boolean:suppress-sound:true",
+                 "-h", "string:sound-name:message-new-email", "-h", "string:image-path:/tmp/pic.png",
+                 "-h", "string:x-custom:hello", "Summary one", "Body <b>bold</b>"});
+    auto r = run(argv, bus.env());
     CHECK_EQ(r.exit_code, 0);
     if (r.exit_code != 0) std::fprintf(stderr, "notify-send: %s\n", r.err.c_str());
     uint32_t id = parse_uint(r.out);
