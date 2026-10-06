@@ -28,6 +28,8 @@
 #include "linux/dbus/object.h"
 #include "linux/dbus/value.h"
 
+#include <brodbus/brodbus.h>
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -177,13 +179,13 @@ public:
                                  const std::vector<std::string>& names);
 
     // The raw bus, bus thread only (for the rare sd-bus feature not wrapped here).
-    sd_bus* raw() const { return bus_; }
+    sd_bus* raw() const { return bus_ ? bus_->raw() : nullptr; }
 
     // ---- internal (used by the sd-bus trampolines)
     struct Node {
         Connection* conn = nullptr;
         std::string path;
-        sd_bus_slot* slot = nullptr;
+        brodbus::Slot slot;
         std::vector<std::shared_ptr<Interface>> interfaces;
     };
     struct Match;
@@ -200,7 +202,7 @@ private:
     void drop_bus();       // releases the bus and every slot (matches / nodes are kept)
     void lost();           // the connection dropped: report, then start reconnecting
     void try_reconnect();  // one attempt (bus thread)
-    void set_unique_name(sd_bus* bus);
+    void set_unique_name(brodbus::Bus* bus);
     bool install_match(Match& m);
     bool install_node(Node& n, std::string* error);
     Reply call_on_thread(const std::string& destination, const std::string& path, const std::string& interface,
@@ -212,7 +214,7 @@ private:
 
     BusKind kind_ = BusKind::Session;
     std::string address_, description_;
-    sd_bus* bus_ = nullptr;
+    std::unique_ptr<brodbus::Bus> bus_;
     int wake_fd_ = -1;
     std::thread thread_;
     std::thread::id thread_id_;

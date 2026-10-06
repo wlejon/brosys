@@ -5,8 +5,8 @@
 #pragma once
 
 #include "linux/support/proc.h"
+#include <brodbus/private_bus.h>
 
-#include <memory>
 #include <string>
 
 namespace bstest {
@@ -15,15 +15,16 @@ class PrivateBus {
 public:
     // Starts dbus-daemon; ok() is false (with error()) when it cannot.
     PrivateBus();
-    ~PrivateBus();
-    bool ok() const { return !address_.empty(); }
+    ~PrivateBus() = default;
+
+    bool ok() const { return bus_.ok(); }
     const std::string& error() const { return error_; }
     // "unix:path=...": stable across restart(), as a systemd bus address is.
     const std::string& address() const { return address_; }
     // As dbus-daemon printed it, with the first instance's ",guid=..." (which
     // pins that instance: sd-bus refuses a restarted daemon at it).
-    const std::string& address_with_guid() const { return guid_address_; }
-    const std::string& dir() const { return dir_->path(); }
+    const std::string& address_with_guid() const { return bus_.address(); }
+    const std::string& dir() const { return dir_; }
     // Environment for a child that should see this bus as both its session
     // and its system bus.
     Env env() const;
@@ -33,12 +34,11 @@ public:
     bool restart();
 
 private:
-    bool launch(std::string* address);
+    void update_addresses();
 
-    std::unique_ptr<TempDir> dir_;
-    std::string config_;
-    Daemon daemon_;
-    std::string address_, guid_address_;
+    brodbus::PrivateBus bus_;
+    std::string address_;
+    std::string dir_;
     std::string error_;
 };
 

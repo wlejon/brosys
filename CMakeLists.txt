@@ -57,6 +57,29 @@ if(WIN32)
     file(GLOB _win_sources CONFIGURE_DEPENDS src/win/*.cpp)
     list(APPEND BROSYS_SOURCES ${_win_sources})
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(NOT TARGET brodbus::brodbus)
+        set(BRODBUS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        if(DEFINED BRODBUS_DIR AND EXISTS "${BRODBUS_DIR}/CMakeLists.txt")
+            # Explicit BRODBUS_DIR supplied
+        elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../brodbus/CMakeLists.txt")
+            set(BRODBUS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../brodbus" CACHE PATH "brodbus source tree")
+        elseif(EXISTS "${CMAKE_SOURCE_DIR}/../brodbus/CMakeLists.txt")
+            set(BRODBUS_DIR "${CMAKE_SOURCE_DIR}/../brodbus" CACHE PATH "brodbus source tree")
+        elseif(EXISTS "${CMAKE_SOURCE_DIR}/third_party/brodbus/CMakeLists.txt")
+            set(BRODBUS_DIR "${CMAKE_SOURCE_DIR}/third_party/brodbus" CACHE PATH "brodbus source tree")
+        elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/brodbus/CMakeLists.txt")
+            set(BRODBUS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/brodbus" CACHE PATH "brodbus source tree")
+        endif()
+
+        if(NOT BRODBUS_DIR OR NOT EXISTS "${BRODBUS_DIR}/CMakeLists.txt")
+            message(FATAL_ERROR
+                "brodbus not found: check it out beside this repository (../brodbus) "
+                "or at third_party/brodbus, or pass -DBRODBUS_DIR=<path>.")
+        endif()
+
+        add_subdirectory("${BRODBUS_DIR}" "${CMAKE_BINARY_DIR}/brodbus-build" EXCLUDE_FROM_ALL)
+    endif()
+
     find_package(PkgConfig REQUIRED)
     find_package(Threads REQUIRED)
     pkg_check_modules(BROSYS_SDBUS REQUIRED IMPORTED_TARGET libsystemd>=246)
@@ -122,7 +145,7 @@ elseif(APPLE)
         "-framework AudioToolbox" "-framework CoreServices" "-framework SystemConfiguration"
         "-framework CoreWLAN" "-framework Network" "-framework AppKit")
 else()
-    target_link_libraries(brosys PRIVATE PkgConfig::BROSYS_SDBUS PUBLIC Threads::Threads)
+    target_link_libraries(brosys PUBLIC brodbus::brodbus Threads::Threads PRIVATE PkgConfig::BROSYS_SDBUS)
     if(BROSYS_WITH_PIPEWIRE)
         target_link_libraries(brosys PRIVATE PkgConfig::BROSYS_PIPEWIRE)
         target_compile_definitions(brosys PRIVATE BROSYS_HAVE_PIPEWIRE=1)
