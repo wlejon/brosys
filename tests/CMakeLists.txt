@@ -64,9 +64,12 @@ if(BROSYS_ENABLE_API)
         add_test(NAME brosys_test_api COMMAND brosys_test_api)
         set_tests_properties(brosys_test_api PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
 
+        # A collection at every allocation over a Debug bronze (-O0, and
+        # instrumented in the coverage job) takes minutes, not seconds. The
+        # limit is there to catch a hang, not to time the run.
         add_test(NAME brosys_test_api_gc_stress COMMAND brosys_test_api)
         set_tests_properties(brosys_test_api_gc_stress PROPERTIES
-            TIMEOUT 120
+            TIMEOUT 600
             SKIP_RETURN_CODE 77
             ENVIRONMENT "BRONZE_GC_STRESS=1;BRONZE_GC_POISON=1")
 
