@@ -88,12 +88,19 @@ static void test_audio_api() {
             if (typeof d.id !== "string") throw new Error("device id must be string");
             if (typeof d.volume !== "number") throw new Error("volume must be number");
             if (typeof d.muted !== "boolean") throw new Error("muted must be boolean");
+        }
 
-            // Mutation calls should execute without throwing on valid devices
-            bro.sys.audio.setVolume(d.id, d.volume);
-            bro.sys.audio.setMute(d.id, d.muted);
-            bro.sys.audio.setDefaultSink(d.id);
-            bro.sys.audio.setDefaultSource(d.id);
+        // The setters act on the machine's real devices, so they run only
+        // with BROSYS_TEST_MUTATE=1, and then only re-apply what the current
+        // default output already has: its volume, its mute state, and its
+        // being the default.
+        if (globalThis.__brosysMutate && st.defaultOutput) {
+            const d = devs.find(x => x.id === st.defaultOutput);
+            if (d) {
+                bro.sys.audio.setVolume(d.id, d.volume);
+                bro.sys.audio.setMute(d.id, d.muted);
+                bro.sys.audio.setDefaultSink(d.id);
+            }
         }
 
         return "SUCCESS";
@@ -114,8 +121,12 @@ static void test_network_api() {
         const scan = bro.sys.network.scanWifi();
         if (!(scan instanceof Promise)) throw new Error("scanWifi must return a Promise");
 
-        const conn = bro.sys.network.connectWifi("NonExistentSSID", "secret");
-        if (!(conn instanceof Promise)) throw new Error("connectWifi must return a Promise");
+        // NetworkManager saves a profile for a connect attempt, so only with
+        // BROSYS_TEST_MUTATE=1.
+        if (globalThis.__brosysMutate) {
+            const conn = bro.sys.network.connectWifi("NonExistentSSID", "secret");
+            if (!(conn instanceof Promise)) throw new Error("connectWifi must return a Promise");
+        }
 
         return "SUCCESS";
     )JS");
@@ -134,9 +145,11 @@ static void test_bluetooth_api() {
         const devs = bro.sys.bluetooth.getDevices();
         if (!Array.isArray(devs)) throw new Error("getDevices must be array");
 
-        // Discovery commands should be methods that don't crash
-        try { bro.sys.bluetooth.startDiscovery(); } catch (e) {}
-        try { bro.sys.bluetooth.stopDiscovery(); } catch (e) {}
+        // Discovery drives the machine's real adapter: BROSYS_TEST_MUTATE=1 only.
+        if (globalThis.__brosysMutate) {
+            try { bro.sys.bluetooth.startDiscovery(); } catch (e) {}
+            try { bro.sys.bluetooth.stopDiscovery(); } catch (e) {}
+        }
 
         const nonDev = bro.sys.bluetooth.getDevice("00:00:00:00:00:00");
         if (nonDev !== null) throw new Error("expected null for non-existent device");
@@ -147,10 +160,15 @@ static void test_bluetooth_api() {
 
 static void test_notifications_api() {
     runScript("Notifications API server lifecycle, posting and history", R"JS(
-        bro.sys.notifications.listen();
         const caps = bro.sys.notifications.getCapabilities();
         if (typeof caps !== "object" || caps === null) throw new Error("capabilities missing");
         if (typeof caps.receivesForeign !== "boolean") throw new Error("receivesForeign missing");
+
+        // listen() claims org.freedesktop.Notifications on the user's session
+        // bus on Linux, standing in for the desktop's notification daemon:
+        // BROSYS_TEST_MUTATE=1 only.
+        if (!globalThis.__brosysMutate) return "SUCCESS";
+        bro.sys.notifications.listen();
 
         const id = bro.sys.notifications.post({
             appName: "TestApp",
@@ -184,6 +202,10 @@ static void test_notifications_api() {
 
 static void test_tray_api() {
     runScript("Tray API host lifecycle, items and status", R"JS(
+        // start() hosts a StatusNotifier watcher on the user's session bus, and
+        // the item calls click other applications' real tray icons:
+        // BROSYS_TEST_MUTATE=1 only.
+        if (!globalThis.__brosysMutate) return "SUCCESS";
         bro.sys.tray.start();
         const st = bro.sys.tray.getStatus();
         if (typeof st !== "object" || st === null) throw new Error("getStatus failed");
@@ -276,6 +298,18 @@ int main() {
     {
         ev::RealmScope scope(realm);
         brosys::api::installSys();
+
+        // Calls that act on the machine's real devices or desktop services run
+        // only with BROSYS_TEST_MUTATE=1 (CI runners are disposable and set it).
+        const char* mutate = std::getenv("BROSYS_TEST_MUTATE");
+        const bool doMutate = mutate && std::string(mutate) == "1";
+        bronze::eval::evalScript(doMutate ? "globalThis.__brosysMutate = true;"
+                                          : "globalThis.__brosysMutate = false;");
+        if (!doMutate) {
+            std::cout << "Note: audio setters, Wi-Fi connect, Bluetooth discovery, the notification "
+                         "server and the tray host were not exercised; set BROSYS_TEST_MUTATE=1 to "
+                         "run them" << std::endl;
+        }
 
         test_mounting();
         test_power_api();

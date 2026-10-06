@@ -38,8 +38,13 @@ if(BROSYS_COVERAGE AND _brosys_top_level)
     message(STATUS "brosys: coverage instrumentation ON (-O0)")
 endif()
 
+# MSVC runtime: the default, the DLL CRT (/MD, /MDd), as bro builds with. The
+# api's tests load bronze_runtime_shared.dll and pass std::string and vectors
+# across that boundary; with the static CRT each module has its own heap, and
+# memory freed on the other side is a Debug assert (__acrt_first_block ==
+# header) and silent heap corruption in Release.
 if(MSVC AND _brosys_top_level)
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 endif()
 
 function(brosys_warnings target)

@@ -46,6 +46,15 @@ inline int finish(const char* name) {
     std::exit(77);
 }
 
+// Writes to the machine's real devices and services (even same-value ones,
+// and devices the test adds and removes itself) run only with
+// BROSYS_TEST_MUTATE=1. CI runners are disposable and set it; a desktop
+// user's machine is left alone.
+inline bool mutate_opted_in() {
+    const char* v = std::getenv("BROSYS_TEST_MUTATE");
+    return v && std::string(v) == "1";
+}
+
 // Polls `pred` until it holds or `timeout` passes.
 inline bool wait_until(const std::function<bool()>& pred, std::chrono::milliseconds timeout,
                        std::chrono::milliseconds step = std::chrono::milliseconds(10)) {

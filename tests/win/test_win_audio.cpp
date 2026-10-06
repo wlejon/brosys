@@ -228,8 +228,12 @@ int main() {
         return 1;
     }
     test_model(*svc);
-    test_idempotent_writes(*svc);
-    test_volume_notifications(*svc);
+    if (bstest::mutate_opted_in()) {
+        test_idempotent_writes(*svc);
+        test_volume_notifications(*svc);
+    } else {
+        std::printf("note: same-value writes to the default endpoint not exercised; set BROSYS_TEST_MUTATE=1\n");
+    }
     svc.reset();
     if (SUCCEEDED(hr)) CoUninitialize();
     return bstest::finish("test_win_audio");

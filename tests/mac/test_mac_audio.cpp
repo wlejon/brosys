@@ -256,8 +256,13 @@ int main() {
     if (!svc) bstest::skip("test_mac_audio", "AudioService::create: " + err);
     test_initial_events(*svc);
     test_devices(*svc);
-    test_same_value_writes(*svc);
-    test_hotplug(*svc);
+    if (bstest::mutate_opted_in()) {
+        test_same_value_writes(*svc);
+        test_hotplug(*svc);
+    } else {
+        std::printf("note: same-value writes and the aggregate-device hot-plug not exercised; "
+                    "set BROSYS_TEST_MUTATE=1\n");
+    }
     svc.reset();
     for (int i = 0; i < 5; ++i) CHECK(AudioService::create({}, &err) != nullptr);
     return bstest::finish("test_mac_audio");

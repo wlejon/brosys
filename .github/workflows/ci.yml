@@ -36,7 +36,14 @@ concurrency:
 # headers. A test whose service a hosted runner genuinely lacks (a user
 # PipeWire session, Wi-Fi hardware) exits 77 and ctest reports it skipped,
 # with the reason in the log.
+#
+# BROSYS_TEST_MUTATE=1: hosted runners are disposable, so the tests that write
+# to the machine's real devices and desktop services (same-value audio
+# writes, the api test's setters, Wi-Fi connect, Bluetooth discovery, the
+# notification server and tray host on the session bus, the Windows loopback
+# adapter install) run here; on a desktop they skip unless opted into.
 env:
+  BROSYS_TEST_MUTATE: "1"
   LINUX_BUILD_PACKAGES: >-
     ninja-build pkg-config libsystemd-dev
   LINUX_PIPEWIRE_PACKAGES: >-

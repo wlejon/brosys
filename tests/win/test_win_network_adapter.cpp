@@ -207,6 +207,8 @@ void run_test() {
 }  // namespace
 
 int main() {
+    if (!bstest::mutate_opted_in())
+        bstest::skip(kName, "installs and removes a network device on this machine; set BROSYS_TEST_MUTATE=1 to run it");
     if (!elevated())
         bstest::skip(kName, "installing a device (the KM-TEST loopback adapter) needs an elevated process");
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
