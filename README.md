@@ -3,7 +3,7 @@
 [![CI](https://github.com/wlejon/brosys/actions/workflows/ci.yml/badge.svg)](https://github.com/wlejon/brosys/actions/workflows/ci.yml)
 
 System-services substrate for a desktop environment built on the
-[bro](https://github.com/wlejon/bro) runtime: power, audio, network, notifications and the tray. A standalone
+[bro](https://github.com/wlejon/bro) runtime: power, audio, network, Bluetooth, notifications and the tray. A standalone
 C++20 library: no dependency on bro or bronze, no JS binding, its own CMake
 and ctest.
 
@@ -29,10 +29,13 @@ for (auto& e : power->events().drain())
 include/brosys/
   common.h          Result, Image (straight RGBA8), Availability
   event_queue.h     MessageQueue<T>
-  power.h           PowerService: devices, source, lid, capabilities, actions, inhibitors
+  power.h           PowerService: devices, source, lid, capabilities, actions, inhibitors;
+                    ScreenSaverServer: org.freedesktop.ScreenSaver mapped onto logind (Linux)
   audio.h           AudioService: sinks/sources, defaults, volume/mute, change events
-  network.h         NetworkService: connectivity, devices + IP config, primary, active connections, Wi-Fi scans
-  notifications.h   NotificationServer: the desktop notification server
+  network.h         NetworkService: connectivity, devices + IP config, primary, active connections,
+                    Wi-Fi scans; Wi-Fi and VPN connect/disconnect (Linux)
+  bluetooth.h       BluetoothService: adapters, devices, power, discovery, pair/connect/remove (Linux)
+  notifications.h   NotificationServer: the desktop notification server, history, Do-Not-Disturb
   tray.h            TrayHost: status-notifier items, menus, interaction
 ```
 
@@ -43,7 +46,11 @@ include/brosys/
 | Power | UPower (real devices only: no DisplayDevice, no line power, `IsPresent`), logind (CanX, actions, Inhibit fds, PrepareForSleep/Shutdown) | GetSystemPowerStatus + battery device class IOCTLs, powrprof capabilities, privilege and policy checks, power requests, shutdown block reasons, power broadcasts | IOKit power sources + AppleSmartBattery, clamshell, IORegisterForSystemPower (Delay inhibitors hold the will-sleep ack), IOPM assertions; reboot/power off via loginwindow AppleEvents (NeedsAuth until Automation consent); no hibernate, no shutdown inhibitors |
 | Audio | PipeWire client (nodes, device routes, `default` metadata, the way wpctl sets them) | Core Audio (IMMNotificationClient, per-endpoint volume callbacks; IPolicyConfig for set_default) | CoreAudio HAL (property listener blocks, virtual main volume, `out:`/`in:` + device UID ids) |
 | Network | NetworkManager (devices, IP configs, active connections, primary, LastScan-tracked scans) | IP Helper (adapters, primary from default routes + interface metrics, change notifications), connectivity hint / NLM, WLAN API (BSS list, IE-parsed security, scan completion) | SystemConfiguration (current set's services, dynamic store, primary) + getifaddrs, Network.framework path monitor, CoreWLAN (SSID/BSSID need Location permission) |
+| Network control | NetworkManager: `connect_wifi` (AddAndActivateConnection with the SSID and passphrase), `disconnect`, `connect_vpn` / `disconnect_vpn` by profile name or UUID | fails with the reason (not implemented) | fails with the reason (not implemented) |
+| Bluetooth | BlueZ 5 on the system bus (ObjectManager, Adapter1, Device1) | `create()` fails with the reason (no backend) | `create()` fails with the reason (no backend) |
+| Screen saver | exports `org.freedesktop.ScreenSaver` (Inhibit/UnInhibit/GetActive/SimulateUserActivity) on the session bus, holding a logind idle inhibitor while any inhibition is held (`PowerConfig::export_screensaver`) | `create()` fails with the reason | `create()` fails with the reason |
 | Notifications | `org.freedesktop.Notifications`, spec 1.2 | shell mode: tray balloons (NIF_INFO) as notifications; alongside Explorer: local only | local only (Notification Center has no server role) |
+| History, Do-Not-Disturb | every platform: posted notifications are kept in `history()` after they close; with DND on they still post, marked `popup_suppressed` | same | same |
 | Tray | StatusNotifierWatcher + host, dbusmenu as data; WatcherClient role beside another watcher | shell mode: owns `Shell_TrayWnd` on its desktop (WM_COPYDATA NIM_*); alongside Explorer: role None | role None (menu-bar extras cannot be hosted by another process) |
 
 Linux D-Bus goes through `src/linux/dbus/` (sd-bus): one `Connection` per
@@ -115,7 +122,9 @@ Linux. Everything that writes runs on a private dbus-daemon (`tests/linux/suppor
 | test_tray_ayatana | a libayatana-appindicator3 GTK app under Xvfb |
 | test_power_mock | real upowerd under umockdev (battery, AC, add/remove) on a private bus, plus `upower -d` |
 | test_power_system | read-only: `upower -d`, busctl CanX, loginctl, systemd-inhibit --list |
-| test_network_fake / _system | scripted NM on a private bus; read-only vs nmcli and `ip route` |
+| test_network_fake / _system | scripted NM on a private bus (including Wi-Fi and VPN activation); read-only vs nmcli and `ip route` |
+| test_bluetooth | scripted BlueZ on a private bus: adapters, devices, power, discovery, connect/pair/remove and their events |
+| test_screensaver | the exported `org.freedesktop.ScreenSaver` driven with gdbus, against a scripted logind on a private system bus |
 | test_network_wifi | opt-in (env, sudo): mac80211_hwsim + hostapd AP vs nmcli; see the file header |
 | test_audio_private | private PipeWire + WirePlumber + null sinks: set through the library, check with wpctl/pactl, and the reverse |
 | test_audio_session | read-only vs wpctl / pactl on the user's session |
