@@ -1,157 +1,174 @@
 # brosys
 
 [![CI](https://github.com/wlejon/brosys/actions/workflows/ci.yml/badge.svg)](https://github.com/wlejon/brosys/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-System-services substrate for a desktop environment built on the
-[bro](https://github.com/wlejon/bro) runtime: power, audio, network, Bluetooth, notifications and the tray. A standalone
-C++20 library: no dependency on bro or bronze, no JS binding, its own CMake
-and ctest.
+System-services substrate for a desktop environment: battery and power state, audio sinks and
+sources, network connectivity and Wi-Fi management, Bluetooth, desktop notifications, and the
+system tray. A standalone C++20 library with native platform backends for Linux, Windows,
+and macOS.
 
-## Model
+brosys sits in the desktop-environment layer of the
+[bro ecosystem](https://github.com/wlejon/bro/blob/main/docs/ecosystem.md). It is consumed by
+the [bro runtime](https://github.com/wlejon/bro) under the `BRO_WITH_SYS` feature gate. The
+engine mounts its JavaScript binding (`brosys_api` in `src/api/`) onto `bro.sys`, providing
+desktop applications with unified reactive access to underlying hardware and OS services.
 
-Each service is created on its own and owns its backend thread(s). Backends
-push value snapshots into the service's `MessageQueue` (`event_queue.h`);
-the host drains it on its own thread. No callback runs host code except the
-queue's optional wake hook. Queries return the latest snapshot; commands
-return a `Result`, and their effect shows up as events. There are no mocks or
-test setters in the public API.
+## Architecture & Model
+
+Each service is created independently and manages its own background worker thread(s).
+Backends push immutable value snapshots into a thread-safe `MessageQueue` (`event_queue.h`),
+which the host drains on its own thread:
+
+- **No callback re-entrancy:** Backend threads never execute host application code; an
+  optional wake hook posts an event to the host loop.
+- **Snapshot queries:** Synchronous queries return the latest known immutable state.
+- **Commands & Results:** Mutating commands return a `Result` status, and real hardware or OS
+  changes arrive asynchronously as events in the queue.
+- **No mocks in production:** Public APIs report genuine hardware state and capabilities; mocks
+  and emulators are restricted strictly to test fixtures.
 
 ```cpp
 std::string err;
-auto power = brosys::PowerService::create({}, &err);   // first PowerChanged already queued
-power->events().set_wake([] { /* post to the host loop */ });
-// on the host thread:
-for (auto& e : power->events().drain())
-    if (auto* c = std::get_if<brosys::PowerChanged>(&e)) render_battery(c->state);
+auto power = brosys::PowerService::create({}, &err);
+power->events().set_wake([] { /* post wake to host event loop */ });
+
+// On the host thread:
+for (auto& ev : power->events().drain()) {
+    if (auto* c = std::get_if<brosys::PowerChanged>(&ev)) {
+        render_battery(c->state);
+    }
+}
 ```
 
 ```
 include/brosys/
-  common.h          Result, Image (straight RGBA8), Availability
-  event_queue.h     MessageQueue<T>
-  power.h           PowerService: devices, source, lid, capabilities, actions, inhibitors;
-                    ScreenSaverServer: org.freedesktop.ScreenSaver mapped onto logind (Linux)
-  audio.h           AudioService: sinks/sources, defaults, volume/mute, change events
-  network.h         NetworkService: connectivity, devices + IP config, primary, active connections,
-                    Wi-Fi scans; Wi-Fi and VPN connect/disconnect (Linux)
-  bluetooth.h       BluetoothService: adapters, devices, power, discovery, pair/connect/remove (Linux)
-  notifications.h   NotificationServer: the desktop notification server, history, Do-Not-Disturb
-  tray.h            TrayHost: status-notifier items, menus, interaction
+  brosys.h          Umbrella header
+  common.h          Result, Image (RGBA8 buffer), Availability
+  event_queue.h     MessageQueue<T> (thread-safe MPSC queue with wake hook)
+  power.h           PowerService: battery levels, AC state, lid switch, inhibitors;
+                    ScreenSaverServer: org.freedesktop.ScreenSaver export
+  audio.h           AudioService: sinks/sources, default device routing, volume, mute
+  network.h         NetworkService: connectivity, interfaces, IP configs, Wi-Fi scans/connect, VPN
+  bluetooth.h       BluetoothService: adapters, devices, power, discovery, pairing/connect
+  notifications.h   NotificationServer: notification daemon, actions, history, Do-Not-Disturb
+  tray.h            TrayHost: status-notifier items, context menus, interaction
+  api.h             Bronze JavaScript binding entry point (brosys_api)
 ```
 
-## Backends
+## Platform Backends
+
+Operating system integrations are implemented directly against native platform facilities:
 
 | Service | Linux | Windows | macOS |
-|---------|-------|---------|-------|
-| Power | UPower (real devices only: no DisplayDevice, no line power, `IsPresent`), logind (CanX, actions, Inhibit fds, PrepareForSleep/Shutdown) | GetSystemPowerStatus + battery device class IOCTLs, powrprof capabilities, privilege and policy checks, power requests, shutdown block reasons, power broadcasts | IOKit power sources + AppleSmartBattery, clamshell, IORegisterForSystemPower (Delay inhibitors hold the will-sleep ack), IOPM assertions; reboot/power off via loginwindow AppleEvents (NeedsAuth until Automation consent); no hibernate, no shutdown inhibitors |
-| Audio | PipeWire client (nodes, device routes, `default` metadata, the way wpctl sets them) | Core Audio (IMMNotificationClient, per-endpoint volume callbacks; IPolicyConfig for set_default) | CoreAudio HAL (property listener blocks, virtual main volume, `out:`/`in:` + device UID ids) |
-| Network | NetworkManager (devices, IP configs, active connections, primary, LastScan-tracked scans) | IP Helper (adapters, primary from default routes + interface metrics, change notifications), connectivity hint / NLM, WLAN API (BSS list, IE-parsed security, scan completion) | SystemConfiguration (current set's services, dynamic store, primary) + getifaddrs, Network.framework path monitor, CoreWLAN (SSID/BSSID need Location permission) |
-| Network control | NetworkManager: `connect_wifi` (AddAndActivateConnection with the SSID and passphrase), `disconnect`, `connect_vpn` / `disconnect_vpn` by profile name or UUID | fails with the reason (not implemented) | fails with the reason (not implemented) |
-| Bluetooth | BlueZ 5 on the system bus (ObjectManager, Adapter1, Device1) | `create()` fails with the reason (no backend) | `create()` fails with the reason (no backend) |
-| Screen saver | exports `org.freedesktop.ScreenSaver` (Inhibit/UnInhibit/GetActive/SimulateUserActivity) on the session bus, holding a logind idle inhibitor while any inhibition is held (`PowerConfig::export_screensaver`) | `create()` fails with the reason | `create()` fails with the reason |
-| Notifications | `org.freedesktop.Notifications`, spec 1.2 | shell mode: tray balloons (NIF_INFO) as notifications; alongside Explorer: local only | local only (Notification Center has no server role) |
-| History, Do-Not-Disturb | every platform: posted notifications are kept in `history()` after they close; with DND on they still post, marked `popup_suppressed` | same | same |
-| Tray | StatusNotifierWatcher + host, dbusmenu as data; WatcherClient role beside another watcher | shell mode: owns `Shell_TrayWnd` on its desktop (WM_COPYDATA NIM_*); alongside Explorer: role None | role None (menu-bar extras cannot be hosted by another process) |
+|---|---|---|---|
+| **Power & Battery** | UPower (`IsPresent`, battery levels, AC status) & logind (idle/shutdown inhibitors, `PrepareForSleep`) via `brodbus` | `GetSystemPowerStatus`, battery IOCTLs, powrprof capabilities, power requests, shutdown block reasons | IOKit power sources (`AppleSmartBattery`), `AppleClamshellState`, `IORegisterForSystemPower` sleep/wake callbacks, IOPM assertions |
+| **Audio** | PipeWire client (`libpipewire-0.3`: nodes, routes, default metadata via `BROSYS_WITH_PIPEWIRE`) | Core Audio (`IMMDeviceEnumerator`, `IMMNotificationClient`, `IAudioEndpointVolume`, `IPolicyConfig`) | CoreAudio HAL (property listener blocks, virtual main volume, `out:`/`in:` device UIDs) |
+| **Network & Wi-Fi** | NetworkManager over D-Bus (`brodbus`): IP config, active connections, Wi-Fi scans, `connect_wifi`, `connect_vpn` | IP Helper API (`GetAdaptersAddresses`, routing metrics), Network List Manager (NLM), WLAN API (`WlanGetNetworkBssList`) | SystemConfiguration dynamic store + `getifaddrs`, `Network.framework` path monitor, `CoreWLAN` |
+| **Network Control** | Full Wi-Fi and VPN connect/disconnect via NetworkManager | Unsupported (reports explanatory error) | Unsupported (reports explanatory error) |
+| **Bluetooth** | BlueZ 5 via `brodbus` (ObjectManager, Adapter1, Device1: pairing, connect, discovery) | Unsupported (reports explanatory error) | Unsupported (reports explanatory error) |
+| **Screen Saver** | Exports `org.freedesktop.ScreenSaver` mapped to logind idle inhibitors | Unsupported (reports explanatory error) | Unsupported (reports explanatory error) |
+| **Notifications** | FreeDesktop `org.freedesktop.Notifications` v1.2 server with actions, hints, and replace | Shell mode: tray balloons (`NIF_INFO`); alongside Explorer: local notifications | Local notification delivery (does not duplicate UNUserNotificationCenter toasts) |
+| **Notification History & DND** | Persistent history log with Do-Not-Disturb suppression across all platforms | Supported | Supported |
+| **System Tray** | StatusNotifierItem (SNI) host + `StatusNotifierWatcher`, `dbusmenu` data model | Shell mode: owns `Shell_TrayWnd` (`WM_COPYDATA NIM_*`); alongside Explorer: role `None` | Role `None` (menu extras cannot be hosted by third-party processes; clients use SDL3 tray) |
 
-Linux D-Bus goes through `src/linux/dbus/` (sd-bus): one `Connection` per
-role with its own thread, `Value` for any D-Bus value, blocking, async and
-deferred calls, matches, timers, name ownership, and object export with
-generated introspection.
+## Building & Dependencies
 
-Windows tray hosting and notification interception need the process to be
-the shell. `TrayMode::Auto` takes the shell role only when no
-`Shell_TrayWnd` exists on the calling thread's desktop. `capabilities()` and
-`status()` report which role applies. Toasts are not interceptable without
-package identity.
+brosys requires CMake 3.24+ and a C++20 compiler.
 
-macOS has neither role to take, so it reports both honestly instead of
-faking them. Nor does brosys post to Notification Center or create an
-NSStatusItem of its own. The host renders the notifications it posts, so
-forwarding them would show each one twice, and UNUserNotificationCenter
-needs an app bundle plus user authorization. A status item of the host's
-own is a tray *client*, which bro gets from SDL3 (`SDL_CreateTray`) on the
-main thread AppKit requires. Objective-C++ is confined to `src/mac/*.mm`
-(CoreWLAN, Network.framework, NSWorkspace) behind C++ headers.
+### Dependencies
 
-## Building
+- **Linux:**
+  - Requires **[brodbus](https://github.com/wlejon/brodbus)** for D-Bus connection management and private bus isolation.
+  - Requires `libsystemd-dev` (sd-bus) >= 246 and `pkg-config`.
+  - Optionally requires `libpipewire-0.3-dev` for the PipeWire audio backend (`-DBROSYS_WITH_PIPEWIRE=ON`, default if found).
+- **Windows:** MSVC 2022+; links `iphlpapi`, `wlanapi`, `powrprof`, `ole32`, `user32`.
+- **macOS:** Apple Clang (macOS 13+); links `IOKit`, `CoreAudio`, `SystemConfiguration`, `CoreWLAN`, `Network`.
 
-There are no sibling repos to fetch: brosys needs CMake 3.24+, a C++20
-compiler and the OS (on Linux, sd-bus from libsystemd and optionally PipeWire).
+### Dependency Resolution (brodbus)
 
-Windows (Visual Studio generator, one build dir):
+On Linux, `brosys` resolves the `brodbus` library following the standard ecosystem order:
+1. **Existing CMake target:** An existing `brodbus::brodbus` target (e.g. added by a superbuild).
+2. **Sibling checkout (development default):** Looked up at `../brodbus` beside this repository (or via `-DBRODBUS_DIR=<path>`).
+3. **Submodule layout (isolated / CI builds):** Embedded in `third_party/brodbus`.
 
 ```bash
+# Sibling layout:
+git clone https://github.com/wlejon/brosys
+git clone https://github.com/wlejon/brodbus   # Sibling directory
+
+# Submodule layout:
+git clone --recursive https://github.com/wlejon/brosys
+# or:
+git submodule update --init --recursive
+```
+
+### Standalone Build
+
+```bash
+# Linux (GCC / Clang + Ninja)
+sudo apt install libsystemd-dev libpipewire-0.3-dev pkg-config ninja-build
+cmake -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build-release
+ctest --test-dir build-release --output-on-failure
+
+# Windows (Visual Studio 2022)
 cmake -B build
 cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
-```
 
-Linux (GCC 12+; Debian package names):
-
-```bash
-sudo apt install libsystemd-dev libpipewire-0.3-dev    # PipeWire optional: BROSYS_WITH_PIPEWIRE
-# test oracles (missing ones skip with a reason):
-sudo apt install dbus-daemon libnotify-bin libglib2.0-bin umockdev libumockdev-dev upower \
-    pipewire wireplumber pipewire-pulse network-manager libayatana-appindicator3-dev xvfb
-cmake -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build-release
+# macOS (Apple Clang + Ninja)
+cmake -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build-release
 ctest --test-dir build-release --output-on-failure
 ```
 
-macOS (Apple clang, macOS 13+; Ninja from Homebrew):
+### Consuming brosys
 
-```bash
-brew install ninja switchaudio-osx    # SwitchAudioSource: test_mac_audio's oracle (skips without it)
-cmake -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build-release
-ctest --test-dir build-release --output-on-failure
+Downstream projects link against `brosys::brosys`:
+
+```cmake
+add_subdirectory(path/to/brosys)
+target_link_libraries(your_target PRIVATE brosys::brosys)
 ```
 
-## Tests
+The standalone Bronze JavaScript binding (`BROSYS_ENABLE_API=ON`, default) builds
+`brosys_api` for the [bronze](https://github.com/wlejon/bronze) runtime. It requires
+`../bronze` and `../brass` beside this repository or `-DBRONZE_DIR=<path>`. Set
+`-DBROSYS_ENABLE_API=OFF` to disable the JavaScript binding.
 
-Real ctests: no `assert()`, and failures count in every configuration. Exit
-77 is a skip, used only when a service or tool is absent, and the test prints
-the reason. The tests are read-only toward the machine. Mutations run only
-in isolation.
+## Tests & Test Oracles
 
-Linux. Everything that writes runs on a private dbus-daemon (`tests/linux/support`):
+All tests use standard ctest without mock assertions in library code. Absent services or
+missing optional tools exit with status `77` (ctest skip) and output the skip reason.
 
-| Test | Oracle |
-|------|--------|
-| test_dbus_layer | busctl, gdbus against exported objects; names, signals, fds, disconnect |
-| test_notify_server | notify-send (actions, --wait, hints, replace, expiry), gdbus calls, gdbus monitor |
-| test_tray_sni | a real SNI item process (`brosys_sni_item`), a second watcher process, busctl / gdbus |
-| test_tray_ayatana | a libayatana-appindicator3 GTK app under Xvfb |
-| test_power_mock | real upowerd under umockdev (battery, AC, add/remove) on a private bus, plus `upower -d` |
-| test_power_system | read-only: `upower -d`, busctl CanX, loginctl, systemd-inhibit --list |
-| test_network_fake / _system | scripted NM on a private bus (including Wi-Fi and VPN activation); read-only vs nmcli and `ip route` |
-| test_bluetooth | scripted BlueZ on a private bus: adapters, devices, power, discovery, connect/pair/remove and their events |
-| test_screensaver | the exported `org.freedesktop.ScreenSaver` driven with gdbus, against a scripted logind on a private system bus |
-| test_network_wifi | opt-in (env, sudo): mac80211_hwsim + hostapd AP vs nmcli; see the file header |
-| test_audio_private | private PipeWire + WirePlumber + null sinks: set through the library, check with wpctl/pactl, and the reverse |
-| test_audio_session | read-only vs wpctl / pactl on the user's session |
-| test_desktop_parse, test_system_models | pure translation layers |
+### Linux Isolation & Oracles
 
-Windows:
+Linux tests run against isolated private bus and daemon environments without touching the
+active user session:
+- **Private `dbus-daemon`:** All mutating tests run on private session/system bus instances
+  managed by `tests/linux/support/private_bus.cpp` via `brodbus`.
+- **UPower & umockdev:** `test_power_mock` drives real `upowerd` under `umockdev` on a private
+  bus, verified against `upower -d`.
+- **PipeWire & WirePlumber:** `test_audio_private` spins up an isolated PipeWire daemon with
+  WirePlumber and null sinks, verified using `wpctl` and `pactl`.
+- **Ayatana Indicators & Notifications:** `test_tray_ayatana` runs a real GTK application under
+  `Xvfb`; `test_notify_server` validates against `notify-send` and `gdbus`.
+- **Opt-in Wi-Fi Testing:** `test_network_wifi` is opt-in (`BRO_TEST_WIFI=1`, requires sudo)
+  and runs against `mac80211_hwsim` with a virtual `hostapd` access point.
 
-| Test | Oracle |
-|------|--------|
-| test_win_power | GetSystemPowerStatus, WMI Win32_Battery, `powercfg /a`, `whoami /priv`, ShutdownBlockReasonQuery |
-| test_win_audio | the MMDevices endpoint store in the registry, Core Audio queried directly |
-| test_win_network | WMI MSFT_NetIPAddress / NetRoute / NetIPInterface / NetAdapter, GetBestInterfaceEx, NLM, `netsh wlan` |
-| test_win_tray_shell | a real `Shell_NotifyIconW` client process (`brosys_tray_client`) on a private desktop |
-| test_win_notify_balloons | balloons from that client, with the NIN_BALLOON* replies it receives |
-| test_win_shell_alongside | the real Explorer, read-only (Auto resolves to None, nothing created) |
-| test_win_tray_wire | wire layouts, icon conversion, balloon mapping |
+### Windows Private Desktop Isolation
 
-macOS. Everything here is read-only; the only writes are same-value ones:
+Windows tray testing requires the host to act as the shell. Calling `Shell_NotifyIconW`
+locates the tray per Windows desktop. `test_win_tray_shell` and `test_win_notify_balloons`
+create an isolated private desktop (`CreateDesktopW`) and run the host and test client
+(`brosys_tray_client.exe`) inside it. Notifications and `TaskbarCreated` messages never leak
+to the developer's interactive Explorer taskbar.
 
-| Test | Oracle |
-|------|--------|
-| test_mac_power | `pmset -g batt`, ioreg AppleClamshellState, `pmset -g` + the console user, `pmset -g assertions` for inhibitors; the will-sleep / Delay handshake through a test seam with synthetic IOKit messages |
-| test_mac_audio | `SwitchAudioSource -a/-c -f json`, osascript `get volume settings`, `system_profiler SPAudioDataType`; Added/Removed via a private aggregate device only this process sees |
-| test_mac_network | `scutil --nwi`, scutil Global IPv4 / DNS, `networksetup -listallhardwareports` / `-listnetworkserviceorder` / `-getairportpower`, ifconfig, `scutil -r` |
-| test_mac_shell | tray role None in every mode, local-only notifications fully working |
+### macOS Test Oracles
 
-Isolating the shell-mode tray: `Shell_NotifyIcon` finds the tray per
-desktop. The tests therefore create a private desktop, run the host's thread
-and the client process on it, and announce TaskbarCreated only to that
-desktop's windows. The user's Explorer tray never sees the icons.
+macOS tests run read-only against native system frameworks:
+- **SwitchAudioSource Oracle:** `test_mac_audio` verifies CoreAudio HAL device listings and
+  volume changes against the `SwitchAudioSource` CLI tool (skips cleanly if not installed).
+- **IOKit Assertions:** Power management tests verify sleep/wake handshakes, clamshell state,
+  and power assertions against `pmset -g` and `ioreg`.
