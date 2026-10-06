@@ -77,6 +77,7 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
                 "or at third_party/brodbus, or pass -DBRODBUS_DIR=<path>.")
         endif()
 
+        message(STATUS "brosys: brodbus from ${BRODBUS_DIR}")
         add_subdirectory("${BRODBUS_DIR}" "${CMAKE_BINARY_DIR}/brodbus-build" EXCLUDE_FROM_ALL)
     endif()
 
@@ -158,7 +159,10 @@ else()
 endif()
 
 # --- Standalone Bronze JavaScript API ---
-option(BROSYS_ENABLE_API "Build Bronze JavaScript API" ON)
+# On by default only when brosys is the top-level project. A library that
+# consumes brosys then never needs bronze checked out; bro, which does want
+# the binding, sets BROSYS_ENABLE_API ON itself.
+option(BROSYS_ENABLE_API "Build Bronze JavaScript API" ${PROJECT_IS_TOP_LEVEL})
 if(BROSYS_ENABLE_API)
     # bronze, the JavaScript runtime the api binds: a checkout beside this one
     # (../bronze, with ../brass beside it — bronze resolves and
