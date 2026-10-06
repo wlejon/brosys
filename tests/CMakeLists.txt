@@ -33,3 +33,49 @@ foreach(fragment
         endif()
     endif()
 endforeach()
+
+if(BROSYS_ENABLE_API)
+    add_executable(brosys_test_api test_sys_api.cpp)
+    target_include_directories(brosys_test_api PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${PROJECT_SOURCE_DIR}/src
+        ${PROJECT_SOURCE_DIR}/src/api
+    )
+    target_link_libraries(brosys_test_api PRIVATE
+        brosys_api
+        bronze_runtime_shared
+    )
+    brosys_warnings(brosys_test_api)
+
+    if(WIN32)
+        add_custom_command(TARGET brosys_test_api POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:bronze_runtime_shared>
+                $<TARGET_FILE_DIR:brosys_test_api>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_LINKER_FILE:bronze_runtime_shared>
+                $<TARGET_FILE_DIR:brosys_test_api>
+        )
+    endif()
+
+    if(NOT BRASS_HOST_BACKEND)
+        message(STATUS "brosys: brosys_test_api not registered (brass has no code generator for this target)")
+    else()
+        add_test(NAME brosys_test_api COMMAND brosys_test_api)
+        set_tests_properties(brosys_test_api PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
+
+        add_test(NAME brosys_test_api_gc_stress COMMAND brosys_test_api)
+        set_tests_properties(brosys_test_api_gc_stress PROPERTIES
+            TIMEOUT 120
+            SKIP_RETURN_CODE 77
+            ENVIRONMENT "BRONZE_GC_STRESS=1;BRONZE_GC_POISON=1")
+
+        if(WIN32)
+            set_tests_properties(brosys_test_api PROPERTIES
+                ENVIRONMENT "PATH=$<TARGET_FILE_DIR:bronze_runtime_shared>;$<TARGET_FILE_DIR:brosys_test_api>;$ENV{PATH}")
+            set_property(TEST brosys_test_api_gc_stress APPEND PROPERTY
+                ENVIRONMENT "PATH=$<TARGET_FILE_DIR:bronze_runtime_shared>;$<TARGET_FILE_DIR:brosys_test_api>;$ENV{PATH}")
+        endif()
+    endif()
+endif()
+

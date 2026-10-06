@@ -134,7 +134,44 @@ else()
     endif()
 endif()
 
+# --- Standalone Bronze JavaScript API ---
+option(BROSYS_ENABLE_API "Build Bronze JavaScript API" ON)
+if(BROSYS_ENABLE_API)
+    # bronze, the JavaScript runtime the api binds: a checkout beside this one
+    # (../bronze, with ../brass beside it — bronze resolves and
+    # add_subdirectory()s its own code generator), the layout of a bro tree and
+    # of CI (bronze's .github/actions/checkout-toolchain), or an explicit
+    # -DBRONZE_DIR. No vendored fallback: the api is bound across bronze's C++
+    # embed boundary, so it has to build against the bronze the surrounding
+    # tree builds against. Under bro this block is skipped, bro having added
+    # bronze already.
+    if(NOT TARGET bronze_runtime_shared)
+        set(BRONZE_BUILD_SHARED_RUNTIME ON CACHE BOOL "" FORCE)
+        set(BRONZE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        if(DEFINED BRONZE_DIR AND EXISTS "${BRONZE_DIR}/CMakeLists.txt")
+            # Explicit BRONZE_DIR supplied
+        elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../bronze/CMakeLists.txt")
+            set(BRONZE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../bronze" CACHE PATH "bronze source tree")
+        elseif(EXISTS "${CMAKE_SOURCE_DIR}/../bronze/CMakeLists.txt")
+            # Beside the top-level project: this repo is a third_party/ submodule
+            # of the project being built.
+            set(BRONZE_DIR "${CMAKE_SOURCE_DIR}/../bronze" CACHE PATH "bronze source tree")
+        endif()
+
+        if(NOT BRONZE_DIR OR NOT EXISTS "${BRONZE_DIR}/CMakeLists.txt")
+            message(FATAL_ERROR
+                "bronze not found: check it out beside this repository (../bronze, with ../brass beside it) "
+                "or pass -DBRONZE_DIR=<path>.")
+        endif()
+
+        add_subdirectory("${BRONZE_DIR}" "${CMAKE_BINARY_DIR}/bronze-build" EXCLUDE_FROM_ALL)
+    endif()
+
+    add_subdirectory(src/api)
+endif()
+
 if(BROSYS_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
+
