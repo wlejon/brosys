@@ -87,21 +87,12 @@ brosys requires CMake 3.24+ and a C++20 compiler.
 
 ### Dependency Resolution (brodbus)
 
-On Linux, `brosys` resolves the `brodbus` library following the standard ecosystem order:
-1. **Existing CMake target:** An existing `brodbus::brodbus` target (e.g. added by a superbuild).
-2. **Sibling checkout (development default):** Looked up at `../brodbus` beside this repository (or via `-DBRODBUS_DIR=<path>`).
-3. **Submodule layout (isolated / CI builds):** Embedded in `third_party/brodbus`.
-
-```bash
-# Sibling layout:
-git clone https://github.com/wlejon/brosys
-git clone https://github.com/wlejon/brodbus   # Sibling directory
-
-# Submodule layout:
-git clone --recursive https://github.com/wlejon/brosys
-# or:
-git submodule update --init --recursive
-```
+On Linux, `brosys` needs the `brodbus` library. There are no submodules: brodbus (and
+bronze, for the JavaScript binding) is a `bro_dependency()` pin in `CMakeLists.txt`,
+resolved through `cmake/bro_deps.cmake` in this order:
+1. **Existing CMake target:** An existing `brodbus` target (e.g. added by a superbuild).
+2. **Working tree:** `../brodbus` beside the top-level project (or `-DFETCHCONTENT_SOURCE_DIR_BRODBUS=<path>`).
+3. **Pinned commit:** fetched from GitHub at configure, so a plain `git clone` builds.
 
 ### Standalone Build
 
@@ -132,10 +123,10 @@ add_subdirectory(path/to/brosys)
 target_link_libraries(your_target PRIVATE brosys::brosys)
 ```
 
-The standalone Bronze JavaScript binding (`BROSYS_ENABLE_API=ON`, default) builds
-`brosys_api` for the [bronze](https://github.com/wlejon/bronze) runtime. It requires
-`../bronze` and `../brass` beside this repository or `-DBRONZE_DIR=<path>`. Set
-`-DBROSYS_ENABLE_API=OFF` to disable the JavaScript binding.
+The standalone Bronze JavaScript binding (`BROSYS_ENABLE_API`, on when brosys is the
+top-level project) builds `brosys_api` for the [bronze](https://github.com/wlejon/bronze)
+runtime. bronze (with brass) resolves like brodbus: `../bronze` beside the top-level project,
+else the pinned commit. Set `-DBROSYS_ENABLE_API=OFF` to disable the JavaScript binding.
 
 ## Tests & Test Oracles
 

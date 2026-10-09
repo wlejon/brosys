@@ -10,24 +10,14 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# brosys resolves its siblings from ../<name> (brodbus, the shared sd-bus
-# layer, on Linux; bronze for the brosys_api JavaScript binding, on in a
-# top-level build), so every job reconstructs that layout in the runner
-# workspace before configuring:
-#
-#     $GITHUB_WORKSPACE/
-#       brosys/    <- this repo, checked out into a named path, not the root
-#       brodbus/
-#       bronze/    <- the JavaScript runtime brosys_api binds
-#       brass/     <- bronze's code generator
-#
-# bronze and brass are laid out by bronze's checkout-toolchain action and
-# compiled inside this build tree with the job's own compiler and CRT; the api
-# is bound across bronze's C++ embed boundary, so a prebuilt bronze would be an
-# unverifiable ABI hazard. brodbus is taken from main, as the stack is
-# developed; the submodule job builds the pinned third_party/brodbus instead.
-# Beyond those, brosys links the OS (sd-bus and, optionally, PipeWire on
-# Linux).
+# brosys's siblings (brodbus, the shared sd-bus layer, on Linux; bronze with
+# brass for the brosys_api JavaScript binding, on in a top-level build) come
+# from the commits CMakeLists.txt pins (cmake/bro_deps.cmake), fetched at
+# configure, so every job builds a plain clone. bronze and brass compile
+# inside this build tree with the job's own compiler and CRT; the api is bound
+# across bronze's C++ embed boundary, so a prebuilt bronze would be an
+# unverifiable ABI hazard. Beyond those, brosys links the OS (sd-bus and,
+# optionally, PipeWire on Linux).
 #
 # The Linux tests are real: every mutation runs on a private dbus-daemon
 # against a real upowerd under umockdev, a real PipeWire + WirePlumber, real
@@ -70,13 +60,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: brosys
-
-      - uses: actions/checkout@v7
-        with:
-          repository: wlejon/brodbus
-          path: brodbus
-
-      - uses: wlejon/bronze/.github/actions/checkout-toolchain@main
 
       - name: Install packages (Linux)
         if: runner.os == 'Linux'
@@ -145,13 +128,6 @@ jobs:
         with:
           path: brosys
 
-      - uses: actions/checkout@v7
-        with:
-          repository: wlejon/brodbus
-          path: brodbus
-
-      - uses: wlejon/bronze/.github/actions/checkout-toolchain@main
-
       - name: Install packages
         run: |
           sudo apt-get update -qq
@@ -175,44 +151,6 @@ jobs:
             grep -h 'SKIPPED:' build/Testing/Temporary/LastTest*.log || echo none
             echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
 
-  # ── Submodule fallback ────────────────────────────────────────────────────
-  #
-  # No brodbus checkout: it comes from the flat third_party/ submodule at the
-  # commit this repo pins, as it does for a fresh `git clone --recursive`.
-  # bronze and brass are the documented exception (the api has to compile
-  # against the bronze of the program that loads it, so there is no submodule
-  # for either) and are laid out beside the repo as in every other job. The
-  # configure step checks brodbus really took the submodule path. Build-only
-  # services: the oracle-backed tests run in the jobs above.
-  submodule:
-    name: Submodule fallback · ubuntu-24.04
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          path: brosys
-          submodules: recursive
-
-      - uses: wlejon/bronze/.github/actions/checkout-toolchain@main
-
-      - name: Install packages
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends $LINUX_BUILD_PACKAGES $LINUX_ORACLE_PACKAGES
-
-      - name: Configure
-        shell: bash
-        run: |
-          test ! -e brodbus
-          cmake -S brosys -B build -G Ninja -DCMAKE_BUILD_TYPE=Release | tee configure.log
-          grep -q "brosys: brodbus from .*third_party/brodbus" configure.log
-
-      - name: Build
-        run: cmake --build build --parallel 4
-
-      - name: Test
-        run: ctest --test-dir build --output-on-failure
-
   # ── Coverage ──────────────────────────────────────────────────────────────
   #
   # Debug (-O0), so this is also the Linux job where assert()s are live.
@@ -223,13 +161,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: brosys
-
-      - uses: actions/checkout@v7
-        with:
-          repository: wlejon/brodbus
-          path: brodbus
-
-      - uses: wlejon/bronze/.github/actions/checkout-toolchain@main
 
       - name: Install packages
         run: |

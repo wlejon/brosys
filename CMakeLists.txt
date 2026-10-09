@@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.24)
 
 project(brosys VERSION 0.2.0 LANGUAGES CXX)
 
+# Dependencies (cmake/bro_deps.cmake): an outer project's target wins, else the
+# ../<name> working tree beside the top-level project, else the pinned commit,
+# fetched at configure.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/bro_deps.cmake)
+
 # Targets
 #   brosys::brosys   system services (power, audio, network, notifications, tray)
 #
@@ -62,29 +67,9 @@ if(WIN32)
     file(GLOB _win_sources CONFIGURE_DEPENDS src/win/*.cpp)
     list(APPEND BROSYS_SOURCES ${_win_sources})
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    if(NOT TARGET brodbus::brodbus)
-        set(BRODBUS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-        if(DEFINED BRODBUS_DIR AND EXISTS "${BRODBUS_DIR}/CMakeLists.txt")
-            # Explicit BRODBUS_DIR supplied
-        elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../brodbus/CMakeLists.txt")
-            set(BRODBUS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../brodbus" CACHE PATH "brodbus source tree")
-        elseif(EXISTS "${CMAKE_SOURCE_DIR}/../brodbus/CMakeLists.txt")
-            set(BRODBUS_DIR "${CMAKE_SOURCE_DIR}/../brodbus" CACHE PATH "brodbus source tree")
-        elseif(EXISTS "${CMAKE_SOURCE_DIR}/third_party/brodbus/CMakeLists.txt")
-            set(BRODBUS_DIR "${CMAKE_SOURCE_DIR}/third_party/brodbus" CACHE PATH "brodbus source tree")
-        elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/brodbus/CMakeLists.txt")
-            set(BRODBUS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/brodbus" CACHE PATH "brodbus source tree")
-        endif()
-
-        if(NOT BRODBUS_DIR OR NOT EXISTS "${BRODBUS_DIR}/CMakeLists.txt")
-            message(FATAL_ERROR
-                "brodbus not found: check it out beside this repository (../brodbus) "
-                "or at third_party/brodbus, or pass -DBRODBUS_DIR=<path>.")
-        endif()
-
-        message(STATUS "brosys: brodbus from ${BRODBUS_DIR}")
-        add_subdirectory("${BRODBUS_DIR}" "${CMAKE_BINARY_DIR}/brodbus-build" EXCLUDE_FROM_ALL)
-    endif()
+    # brodbus, the sd-bus layer: an outer project's target, else ../brodbus
+    # beside the top-level project, else the pinned commit, fetched at configure.
+    bro_dependency(brodbus GITHUB wlejon/brodbus REF 714ded627aed1c0db4b046d143bcc29e1ec9e9cf OPTIONS BRODBUS_BUILD_TESTS=OFF)
 
     find_package(PkgConfig REQUIRED)
     find_package(Threads REQUIRED)
@@ -169,35 +154,12 @@ endif()
 # the binding, sets BROSYS_ENABLE_API ON itself.
 option(BROSYS_ENABLE_API "Build Bronze JavaScript API" ${PROJECT_IS_TOP_LEVEL})
 if(BROSYS_ENABLE_API)
-    # bronze, the JavaScript runtime the api binds: a checkout beside this one
-    # (../bronze, with ../brass beside it — bronze resolves and
-    # add_subdirectory()s its own code generator), the layout of a bro tree and
-    # of CI (bronze's .github/actions/checkout-toolchain), or an explicit
-    # -DBRONZE_DIR. No vendored fallback: the api is bound across bronze's C++
-    # embed boundary, so it has to build against the bronze the surrounding
-    # tree builds against. Under bro this block is skipped, bro having added
-    # bronze already.
-    if(NOT TARGET bronze_runtime_shared)
-        set(BRONZE_BUILD_SHARED_RUNTIME ON CACHE BOOL "" FORCE)
-        set(BRONZE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-        if(DEFINED BRONZE_DIR AND EXISTS "${BRONZE_DIR}/CMakeLists.txt")
-            # Explicit BRONZE_DIR supplied
-        elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../bronze/CMakeLists.txt")
-            set(BRONZE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../bronze" CACHE PATH "bronze source tree")
-        elseif(EXISTS "${CMAKE_SOURCE_DIR}/../bronze/CMakeLists.txt")
-            # Beside the top-level project: this repo is a third_party/ submodule
-            # of the project being built.
-            set(BRONZE_DIR "${CMAKE_SOURCE_DIR}/../bronze" CACHE PATH "bronze source tree")
-        endif()
-
-        if(NOT BRONZE_DIR OR NOT EXISTS "${BRONZE_DIR}/CMakeLists.txt")
-            message(FATAL_ERROR
-                "bronze not found: check it out beside this repository (../bronze, with ../brass beside it) "
-                "or pass -DBRONZE_DIR=<path>.")
-        endif()
-
-        add_subdirectory("${BRONZE_DIR}" "${CMAKE_BINARY_DIR}/bronze-build" EXCLUDE_FROM_ALL)
-    endif()
+    # bronze (with brass, its code generator), the JavaScript runtime the api
+    # binds, through cmake/bro_deps.cmake: an outer project's target (under bro
+    # this is bro's own bronze), else ../bronze beside the top-level project,
+    # else the pinned commit, fetched at configure.
+    bro_dependency(bronze GITHUB wlejon/bronze REF 15ce4cf5fc25d8afe03882985ae95adcba46a6a9 TARGET bronze_runtime_shared
+                   OPTIONS BRONZE_BUILD_SHARED_RUNTIME=ON BRONZE_BUILD_TESTS=OFF)
 
     add_subdirectory(src/api)
 endif()

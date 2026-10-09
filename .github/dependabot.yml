@@ -1,8 +1,9 @@
 version: 2
 
-# No package manifest to watch: brosys links only the OS (sd-bus and PipeWire
-# come from the distribution). That leaves the pinned actions in
-# .github/workflows/.
+# No package manifest to watch: brosys links the OS (sd-bus and PipeWire come
+# from the distribution), and brodbus and bronze are bro_dependency() pins in
+# CMakeLists.txt, moved deliberately (bro's scripts/bump-deps.sh). That leaves
+# the pinned actions in .github/workflows/.
 updates:
   - package-ecosystem: github-actions
     directory: /
