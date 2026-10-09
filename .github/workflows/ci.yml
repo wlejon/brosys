@@ -12,7 +12,7 @@ concurrency:
 
 # brosys's siblings (brodbus, the shared sd-bus layer, on Linux; bronze with
 # brass for the brosys_api JavaScript binding, on in a top-level build) come
-# from the commits CMakeLists.txt pins (cmake/bro_deps.cmake), fetched at
+# from the heads of their main branches (cmake/bro_deps.cmake), fetched at
 # configure, so every job builds a plain clone. bronze and brass compile
 # inside this build tree with the job's own compiler and CRT; the api is bound
 # across bronze's C++ embed boundary, so a prebuilt bronze would be an

@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.24)
 project(brosys VERSION 0.2.0 LANGUAGES CXX)
 
 # Dependencies (cmake/bro_deps.cmake): an outer project's target wins, else the
-# ../<name> working tree beside the top-level project, else the pinned commit,
+# ../<name> working tree beside the top-level project, else the head of its main,
 # fetched at configure.
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/bro_deps.cmake)
 
@@ -68,7 +68,7 @@ if(WIN32)
     list(APPEND BROSYS_SOURCES ${_win_sources})
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # brodbus, the sd-bus layer: an outer project's target, else ../brodbus
-    # beside the top-level project, else the pinned commit, fetched at configure.
+    # beside the top-level project, else the head of its main, fetched at configure.
     bro_dependency(brodbus GITHUB wlejon/brodbus OPTIONS BRODBUS_BUILD_TESTS=OFF)
 
     find_package(PkgConfig REQUIRED)
@@ -157,7 +157,7 @@ if(BROSYS_ENABLE_API)
     # bronze (with brass, its code generator), the JavaScript runtime the api
     # binds, through cmake/bro_deps.cmake: an outer project's target (under bro
     # this is bro's own bronze), else ../bronze beside the top-level project,
-    # else the pinned commit, fetched at configure.
+    # else the head of its main, fetched at configure.
     bro_dependency(bronze GITHUB wlejon/bronze TARGET bronze_runtime_shared
                    OPTIONS BRONZE_BUILD_SHARED_RUNTIME=ON BRONZE_BUILD_TESTS=OFF)
 

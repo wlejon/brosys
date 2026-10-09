@@ -1,8 +1,8 @@
 version: 2
 
 # No package manifest to watch: brosys links the OS (sd-bus and PipeWire come
-# from the distribution), and brodbus and bronze are bro_dependency() pins in
-# CMakeLists.txt, moved deliberately (bro's scripts/bump-deps.sh). That leaves
+# from the distribution), and brodbus and bronze are bro_dependency() calls in
+# CMakeLists.txt that track their main. That leaves
 # the pinned actions in .github/workflows/.
 updates:
   - package-ecosystem: github-actions

@@ -126,7 +126,7 @@ target_link_libraries(your_target PRIVATE brosys::brosys)
 The standalone Bronze JavaScript binding (`BROSYS_ENABLE_API`, on when brosys is the
 top-level project) builds `brosys_api` for the [bronze](https://github.com/wlejon/bronze)
 runtime. bronze (with brass) resolves like brodbus: `../bronze` beside the top-level project,
-else the pinned commit. Set `-DBROSYS_ENABLE_API=OFF` to disable the JavaScript binding.
+else the head of its main branch. Set `-DBROSYS_ENABLE_API=OFF` to disable the JavaScript binding.
 
 ## Tests & Test Oracles
 
