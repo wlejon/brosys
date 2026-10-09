@@ -69,7 +69,7 @@ if(WIN32)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # brodbus, the sd-bus layer: an outer project's target, else ../brodbus
     # beside the top-level project, else the pinned commit, fetched at configure.
-    bro_dependency(brodbus GITHUB wlejon/brodbus REF 714ded627aed1c0db4b046d143bcc29e1ec9e9cf OPTIONS BRODBUS_BUILD_TESTS=OFF)
+    bro_dependency(brodbus GITHUB wlejon/brodbus OPTIONS BRODBUS_BUILD_TESTS=OFF)
 
     find_package(PkgConfig REQUIRED)
     find_package(Threads REQUIRED)
@@ -158,7 +158,7 @@ if(BROSYS_ENABLE_API)
     # binds, through cmake/bro_deps.cmake: an outer project's target (under bro
     # this is bro's own bronze), else ../bronze beside the top-level project,
     # else the pinned commit, fetched at configure.
-    bro_dependency(bronze GITHUB wlejon/bronze REF 15ce4cf5fc25d8afe03882985ae95adcba46a6a9 TARGET bronze_runtime_shared
+    bro_dependency(bronze GITHUB wlejon/bronze TARGET bronze_runtime_shared
                    OPTIONS BRONZE_BUILD_SHARED_RUNTIME=ON BRONZE_BUILD_TESTS=OFF)
 
     add_subdirectory(src/api)
