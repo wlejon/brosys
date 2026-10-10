@@ -254,10 +254,14 @@ void installSys() {
 }
 
 void tickSysAsync() {
-    tickPower();
-    tickAudio();
-    tickNetwork();
-    tickBluetooth();
+    // Only services something has started: the tick runs every frame of
+    // every app, and the getters create a service on first use (PipeWire or
+    // the Windows audio endpoints, NetworkManager, BlueZ), which is tens of
+    // ms on the page's thread for an app that never asked for one.
+    if (g_services.power) tickPower();
+    if (g_services.audio) tickAudio();
+    if (g_services.network) tickNetwork();
+    if (g_services.bluetooth) tickBluetooth();
     tickNotifications();
     tickTray();
 
