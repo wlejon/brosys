@@ -11,6 +11,7 @@
 #include "brosys/network.h"
 #include "brosys/notifications.h"
 #include "brosys/power.h"
+#include "brosys/processes.h"
 #include "brosys/tray.h"
 
 #define BROSYS_VERSION_MAJOR 0

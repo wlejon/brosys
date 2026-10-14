@@ -38,7 +38,7 @@ static void test_mounting() {
     CHECK(ev::isObject(sys.get()));
 
     const char* subNames[] = {
-        "power", "audio", "network", "bluetooth", "notifications", "tray"
+        "power", "audio", "network", "bluetooth", "notifications", "tray", "processes"
     };
     for (const char* name : subNames) {
         ev::Persistent sub(ev::getProperty(sys.get(), name));
@@ -289,6 +289,51 @@ static void test_gc_stress() {
     }
 }
 
+static void test_processes_api() {
+    runScript("Processes API listProcesses and killProcess validation", R"JS(
+        if (typeof bro.sys.listProcesses !== "function") throw new Error("missing bro.sys.listProcesses");
+        if (typeof bro.sys.killProcess !== "function") throw new Error("missing bro.sys.killProcess");
+        if (typeof bro.sys.processes.list !== "function") throw new Error("missing bro.sys.processes.list");
+        if (typeof bro.sys.processes.kill !== "function") throw new Error("missing bro.sys.processes.kill");
+
+        const procs = bro.sys.listProcesses();
+        if (!Array.isArray(procs) || procs.length === 0) throw new Error("listProcesses returned empty");
+        const p = procs[0];
+        if (typeof p.pid !== "number" || p.pid <= 0) throw new Error("invalid pid");
+        if (typeof p.ppid !== "number") throw new Error("invalid ppid");
+        if (typeof p.name !== "string" || p.name.length === 0) throw new Error("invalid name");
+        if (typeof p.cmdline !== "string") throw new Error("invalid cmdline");
+        if (typeof p.state !== "string" || p.state.length === 0) throw new Error("invalid state");
+        if (typeof p.user !== "string") throw new Error("invalid user");
+        if (typeof p.uid !== "number") throw new Error("invalid uid");
+        if (typeof p.rssBytes !== "number" || typeof p.rss_bytes !== "number") throw new Error("invalid rssBytes");
+        if (typeof p.vszBytes !== "number" || typeof p.vsz_bytes !== "number") throw new Error("invalid vszBytes");
+        if (typeof p.cpuTimeMs !== "number" || typeof p.cpu_time_ms !== "number") throw new Error("invalid cpuTimeMs");
+        if (typeof p.threads !== "number" || p.threads < 1) throw new Error("invalid threads");
+
+        const procs2 = bro.sys.processes.list();
+        if (!Array.isArray(procs2) || procs2.length === 0) throw new Error("processes.list returned empty");
+
+        let caughtPid1 = false;
+        try {
+            bro.sys.killProcess(1, "SIGTERM");
+        } catch (e) {
+            caughtPid1 = true;
+        }
+        if (!caughtPid1) throw new Error("expected killProcess(1) to throw");
+
+        let caughtBadSig = false;
+        try {
+            bro.sys.processes.kill(999999, "NOT_A_SIGNAL");
+        } catch (e) {
+            caughtBadSig = true;
+        }
+        if (!caughtBadSig) throw new Error("expected unknown signal to throw");
+
+        return "SUCCESS";
+    )JS");
+}
+
 int main() {
     std::cout << "Running brosys API unit tests..." << std::endl;
     const char* stress = std::getenv("BRONZE_GC_STRESS");
@@ -318,6 +363,7 @@ int main() {
         test_bluetooth_api();
         test_notifications_api();
         test_tray_api();
+        test_processes_api();
         test_events_and_async_tick();
         test_gc_stress();
 

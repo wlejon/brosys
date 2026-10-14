@@ -194,4 +194,51 @@ const char* to_string(TrayItemStatus s) {
     return "active";
 }
 
+int32_t parse_signal(std::string_view name) {
+    while (!name.empty() && (name.front() == ' ' || name.front() == '\t')) name.remove_prefix(1);
+    while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) name.remove_suffix(1);
+    if (name.empty()) return 0;
+
+    std::string up;
+    up.reserve(name.size());
+    bool all_digits = true;
+    for (char c : name) {
+        if (c < '0' || c > '9') all_digits = false;
+        if (c >= 'a' && c <= 'z') up.push_back(static_cast<char>(c - 'a' + 'A'));
+        else up.push_back(c);
+    }
+
+    if (all_digits) {
+        int32_t v = 0;
+        for (char c : up) {
+            v = v * 10 + (c - '0');
+            if (v > 64) return 0;
+        }
+        return v > 0 ? v : 0;
+    }
+
+    if (up.rfind("SIG", 0) == 0) {
+        up.erase(0, 3);
+    }
+    if (up == "TERM") return signal_num::SIGTERM_NUM;
+    if (up == "KILL") return signal_num::SIGKILL_NUM;
+    if (up == "INT")  return signal_num::SIGINT_NUM;
+    if (up == "HUP")  return signal_num::SIGHUP_NUM;
+    if (up == "STOP") return signal_num::SIGSTOP_NUM;
+    if (up == "CONT") return signal_num::SIGCONT_NUM;
+    return 0;
+}
+
+std::unique_ptr<ProcessService> ProcessService::create(std::string*) {
+    return std::make_unique<ProcessService>();
+}
+
+std::vector<ProcessInfo> ProcessService::list() const {
+    return list_processes();
+}
+
+Result ProcessService::kill(int32_t pid, int32_t signal) {
+    return kill_process(pid, signal);
+}
+
 }  // namespace brosys

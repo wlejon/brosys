@@ -37,6 +37,9 @@ struct ServiceState {
 
     TrayHost* tray = nullptr;
     bool ownTray = false;
+
+    ProcessService* processes = nullptr;
+    bool ownProcesses = false;
 };
 
 ServiceState g_services;
@@ -192,6 +195,26 @@ void setTrayHost(TrayHost* host, bool own) {
     g_services.ownTray = own;
 }
 
+ProcessService* getProcessService() {
+    if (!g_services.processes) {
+        std::string err;
+        auto svc = ProcessService::create(&err);
+        if (svc) {
+            g_services.processes = svc.release();
+            g_services.ownProcesses = true;
+        }
+    }
+    return g_services.processes;
+}
+
+void setProcessService(ProcessService* service, bool own) {
+    if (g_services.ownProcesses && g_services.processes) {
+        delete g_services.processes;
+    }
+    g_services.processes = service;
+    g_services.ownProcesses = own;
+}
+
 void installSys() {
     // Locate or create the `bro` namespace
     ev::GlobalValue g = ev::globalValue("bro");
@@ -241,6 +264,7 @@ void installSys() {
     installBluetooth(sys);
     installNotifications(sys);
     installTray(sys);
+    installProcesses(sys);
 
     // Attach sys to bro
     broNs.set(ev::setProperty(broNs.get(), "sys", sys.get()));
@@ -275,6 +299,7 @@ void shutdownSysAsync() {
     shutdownBluetooth();
     shutdownNotifications();
     shutdownTray();
+    shutdownProcesses();
 
     g_subscriptions.clear();
 
@@ -307,6 +332,11 @@ void shutdownSysAsync() {
         delete g_services.tray;
         g_services.tray = nullptr;
         g_services.ownTray = false;
+    }
+    if (g_services.ownProcesses && g_services.processes) {
+        delete g_services.processes;
+        g_services.processes = nullptr;
+        g_services.ownProcesses = false;
     }
 }
 

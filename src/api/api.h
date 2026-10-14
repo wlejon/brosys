@@ -45,6 +45,9 @@ void setNotificationServer(NotificationServer* server, bool own = false);
 TrayHost* getTrayHost();
 void setTrayHost(TrayHost* host, bool own = false);
 
+ProcessService* getProcessService();
+void setProcessService(ProcessService* service, bool own = false);
+
 // Event registration & dispatch
 void addEventListener(std::string_view target, std::string_view event, Value callback);
 void removeEventListener(std::string_view target, std::string_view event, Value callback);
@@ -57,6 +60,7 @@ void installNetwork(ObjectBuilder& sys);
 void installBluetooth(ObjectBuilder& sys);
 void installNotifications(ObjectBuilder& sys);
 void installTray(ObjectBuilder& sys);
+void installProcesses(ObjectBuilder& sys);
 
 // Subsystem tick & shutdown
 void tickPower();
@@ -72,6 +76,7 @@ void shutdownNetwork();
 void shutdownBluetooth();
 void shutdownNotifications();
 void shutdownTray();
+void shutdownProcesses();
 
 } // namespace brosys::api
 
