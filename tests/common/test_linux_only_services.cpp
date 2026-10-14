@@ -13,10 +13,20 @@ using namespace brosys;
 
 int main() {
     std::string err;
+#if defined(_WIN32)
+    auto bt = BluetoothService::create({}, &err);
+    CHECK(bt != nullptr);
+    CHECK(err.empty());
+    std::printf("BluetoothService::create (Windows): ok (adapters=%zu, devices=%zu)\n",
+                bt ? bt->adapters().size() : 0, bt ? bt->devices().size() : 0);
+    CHECK(BluetoothService::create({}, nullptr) != nullptr);
+#else
     auto bt = BluetoothService::create({}, &err);
     CHECK(bt == nullptr);
     CHECK(!err.empty());
     std::printf("BluetoothService::create: %s\n", err.c_str());
+    CHECK(BluetoothService::create({}, nullptr) == nullptr);
+#endif
 
     err.clear();
     auto ss = ScreenSaverServer::create({}, &err);
@@ -24,7 +34,5 @@ int main() {
     CHECK(!err.empty());
     std::printf("ScreenSaverServer::create: %s\n", err.c_str());
 
-    // Null error pointers are allowed.
-    CHECK(BluetoothService::create({}, nullptr) == nullptr);
     return bstest::finish("test_linux_only_services");
 }

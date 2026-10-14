@@ -128,7 +128,7 @@ if(WIN32)
     target_compile_definitions(brosys PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE _WIN32_WINNT=0x0A00)
     target_link_libraries(brosys PRIVATE
         user32 gdi32 shell32 ole32 oleaut32 advapi32 powrprof setupapi
-        iphlpapi ws2_32 wlanapi uuid)
+        iphlpapi ws2_32 wlanapi bthprops uuid)
 elseif(APPLE)
     target_compile_options(brosys PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
     target_link_libraries(brosys PUBLIC Threads::Threads PRIVATE

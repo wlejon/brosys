@@ -7,6 +7,7 @@
 #include "win/util.h"
 
 #include <cstdio>
+#include <cstring>
 
 namespace brosys::win {
 
@@ -229,6 +230,137 @@ std::vector<WifiAccessPoint> WifiClient::access_points(const WifiInterface& ifac
 DWORD WifiClient::scan(const GUID& iface) {
     if (!handle_) return ERROR_INVALID_HANDLE;
     return WlanScan(handle_, &iface, nullptr, nullptr, nullptr);
+}
+
+namespace {
+
+std::string xml_escape(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+            case '&': out += "&amp;"; break;
+            case '<': out += "&lt;"; break;
+            case '>': out += "&gt;"; break;
+            case '"': out += "&quot;"; break;
+            case '\'': out += "&apos;"; break;
+            default: out.push_back(c); break;
+        }
+    }
+    return out;
+}
+
+std::string hex_encode(std::string_view s) {
+    std::string out;
+    out.reserve(s.size() * 2);
+    char buf[3];
+    for (unsigned char c : s) {
+        std::snprintf(buf, sizeof(buf), "%02X", c);
+        out += buf;
+    }
+    return out;
+}
+
+std::string build_wlan_profile_xml(const std::string& ssid, const std::string& passphrase, WifiSecurity security) {
+    const std::string esc_ssid = xml_escape(ssid);
+    const std::string hex_ssid = hex_encode(ssid);
+
+    std::string auth = "WPA2PSK";
+    std::string enc = "AES";
+    std::string key_type = "passPhrase";
+    bool has_key = !passphrase.empty();
+
+    if (security == WifiSecurity::Open || (passphrase.empty() && security == WifiSecurity::Unknown)) {
+        auth = "open";
+        enc = "none";
+        has_key = false;
+    } else if (security == WifiSecurity::Owe) {
+        auth = "OWE";
+        enc = "AES";
+        has_key = false;
+    } else if (security == WifiSecurity::Wep) {
+        auth = "open";
+        enc = "WEP";
+        key_type = "networkKey";
+    } else if (security == WifiSecurity::WpaPersonal) {
+        auth = "WPAPSK";
+        enc = "TKIP";
+    } else if (security == WifiSecurity::Wpa3Personal) {
+        auth = "WPA3SAE";
+        enc = "AES";
+    } else {
+        auth = "WPA2PSK";
+        enc = "AES";
+    }
+
+    std::string xml = "<?xml version=\"1.0\"?>\n"
+                      "<WLANProfile xmlns=\"http://www.microsoft.com/networking/WLAN/profile/v1\">\n"
+                      "  <name>" + esc_ssid + "</name>\n"
+                      "  <SSIDConfig>\n"
+                      "    <SSID>\n"
+                      "      <hex>" + hex_ssid + "</hex>\n"
+                      "      <name>" + esc_ssid + "</name>\n"
+                      "    </SSID>\n"
+                      "  </SSIDConfig>\n"
+                      "  <connectionType>ESS</connectionType>\n"
+                      "  <connectionMode>auto</connectionMode>\n"
+                      "  <MSM>\n"
+                      "    <security>\n"
+                      "      <authEncryption>\n"
+                      "        <authentication>" + auth + "</authentication>\n"
+                      "        <encryption>" + enc + "</encryption>\n"
+                      "        <useOneX>false</useOneX>\n"
+                      "      </authEncryption>\n";
+    if (has_key) {
+        xml += "      <sharedKey>\n"
+               "        <keyType>" + key_type + "</keyType>\n"
+               "        <protected>false</protected>\n"
+               "        <keyMaterial>" + xml_escape(passphrase) + "</keyMaterial>\n"
+               "      </sharedKey>\n";
+    }
+    xml += "    </security>\n"
+           "  </MSM>\n"
+           "</WLANProfile>";
+    return xml;
+}
+
+}  // namespace
+
+DWORD WifiClient::connect(const GUID& iface, const std::string& ssid, const std::string& passphrase,
+                          WifiSecurity security, DWORD* reason_out) {
+    if (!handle_) return ERROR_INVALID_HANDLE;
+    if (ssid.empty() || ssid.size() > DOT11_SSID_MAX_LENGTH) return ERROR_INVALID_PARAMETER;
+
+    std::wstring wprofile = to_wide(ssid);
+    std::string xml = build_wlan_profile_xml(ssid, passphrase, security);
+    std::wstring wxml = to_wide(xml);
+
+    DWORD reason = 0;
+    DWORD r = WlanSetProfile(handle_, &iface, 0, wxml.c_str(), nullptr, TRUE, nullptr, &reason);
+    if (reason_out) *reason_out = reason;
+    // If WlanSetProfile fails and no passphrase was supplied, an existing saved profile might still work.
+    if (r != ERROR_SUCCESS && !passphrase.empty()) {
+        return r;
+    }
+
+    DOT11_SSID dot11_ssid{};
+    dot11_ssid.uSSIDLength = static_cast<ULONG>(ssid.size());
+    std::memcpy(dot11_ssid.ucSSID, ssid.data(), ssid.size());
+
+    WLAN_CONNECTION_PARAMETERS params{};
+    params.wlanConnectionMode = wlan_connection_mode_profile;
+    params.strProfile = wprofile.c_str();
+    params.pDot11Ssid = &dot11_ssid;
+    params.pDesiredBssidList = nullptr;
+    params.dot11BssType = dot11_BSS_type_infrastructure;
+    params.dwFlags = 0;
+
+    return WlanConnect(handle_, &iface, &params, nullptr);
+}
+
+DWORD WifiClient::disconnect(const GUID& iface) {
+    if (!handle_) return ERROR_INVALID_HANDLE;
+    return WlanDisconnect(handle_, &iface, nullptr);
 }
 
 }  // namespace brosys::win

@@ -45,6 +45,9 @@ public:
     std::vector<WifiInterface> interfaces();
     std::vector<WifiAccessPoint> access_points(const WifiInterface& iface);
     DWORD scan(const GUID& iface);
+    DWORD connect(const GUID& iface, const std::string& ssid, const std::string& passphrase,
+                  WifiSecurity security, DWORD* reason_out = nullptr);
+    DWORD disconnect(const GUID& iface);
 
 private:
     static void WINAPI on_notification(PWLAN_NOTIFICATION_DATA data, PVOID context);

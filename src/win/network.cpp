@@ -99,12 +99,17 @@ public:
         return fut.get();
     }
 
-    Result connect_wifi(const std::string&, const std::string&, const std::string&, WifiSecurity) override {
-        return Result::failure("connect_wifi is unsupported on Windows");
+    Result connect_wifi(const std::string& device_id, const std::string& ssid,
+                        const std::string& passphrase, WifiSecurity security) override {
+        return run_on_worker([this, device_id, ssid, passphrase, security] {
+            return do_connect_wifi(device_id, ssid, passphrase, security);
+        });
     }
 
-    Result disconnect(const std::string&) override {
-        return Result::failure("disconnect is unsupported on Windows");
+    Result disconnect(const std::string& connection_id_or_device_id) override {
+        return run_on_worker([this, connection_id_or_device_id] {
+            return do_disconnect(connection_id_or_device_id);
+        });
     }
 
     Result connect_vpn(const std::string&) override {
@@ -116,6 +121,18 @@ public:
     }
 
 private:
+    template <class Fn>
+    Result run_on_worker(Fn&& fn) {
+        auto task = std::make_shared<std::packaged_task<Result()>>(std::forward<Fn>(fn));
+        auto fut = task->get_future();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stop_ || finished_) return Result::failure("the network service is shutting down");
+            commands_.push_back([task] { (*task)(); });
+        }
+        cv_.notify_all();
+        return fut.get();
+    }
     struct ScanSignal {
         std::string device_id;
         int kind;  // 1 complete, 2 failed, 3 list refreshed
@@ -178,6 +195,88 @@ private:
             for (auto& [id, dl] : pending_scans_) started |= device_id.empty() || id == device_id;
             if (!started) return Result::failure(errors);
         }
+        return Result::success();
+    }
+
+    Result do_connect_wifi(const std::string& device_id, const std::string& ssid,
+                           const std::string& passphrase, WifiSecurity security) {
+        if (ssid.empty()) return Result::failure("SSID must not be empty");
+        if (!wifi_.is_open()) {
+            return Result::failure("Wi-Fi is unavailable: " +
+                                   (wifi_error_.empty() ? std::string("no WLAN service") : wifi_error_));
+        }
+        auto ifaces = wifi_.interfaces();
+        if (ifaces.empty()) return Result::failure("no Wi-Fi device");
+
+        const win::WifiInterface* chosen = nullptr;
+        for (const auto& w : ifaces) {
+            if (device_id.empty() || w.device_id == device_id || w.description == device_id) {
+                chosen = &w;
+                break;
+            }
+        }
+        if (!chosen) return Result::failure("no Wi-Fi device " + device_id);
+
+        // If security is Unknown and a cached AP matches the SSID, use its advertised security.
+        WifiSecurity eff_sec = security;
+        if (eff_sec == WifiSecurity::Unknown && !passphrase.empty()) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = aps_.find(chosen->device_id);
+            if (it != aps_.end()) {
+                for (const auto& ap : it->second) {
+                    if (ap.ssid == ssid && ap.security != WifiSecurity::Unknown) {
+                        eff_sec = ap.security;
+                        break;
+                    }
+                }
+            }
+        }
+
+        DWORD reason = 0;
+        DWORD r = wifi_.connect(chosen->guid, ssid, passphrase, eff_sec, &reason);
+        if (r != ERROR_SUCCESS) {
+            return Result::failure(win::win32_error("WlanConnect", r));
+        }
+        mark_dirty();
+        return Result::success();
+    }
+
+    Result do_disconnect(const std::string& target) {
+        if (!wifi_.is_open()) {
+            return Result::failure("Wi-Fi is unavailable: " +
+                                   (wifi_error_.empty() ? std::string("no WLAN service") : wifi_error_));
+        }
+        auto ifaces = wifi_.interfaces();
+        if (ifaces.empty()) return Result::failure("no Wi-Fi device");
+
+        std::string resolved_id = target;
+        if (!target.empty()) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (const auto& d : state_.devices) {
+                if (d.id == target || d.interface_name == target || d.connection == target) {
+                    resolved_id = d.id;
+                    break;
+                }
+            }
+        }
+
+        bool any = false;
+        DWORD last_err = ERROR_SUCCESS;
+        for (const auto& w : ifaces) {
+            if (resolved_id.empty() || w.device_id == resolved_id || w.profile == target ||
+                w.ssid == target || w.description == target) {
+                any = true;
+                DWORD r = wifi_.disconnect(w.guid);
+                if (r != ERROR_SUCCESS) last_err = r;
+            }
+        }
+        if (!any) {
+            return Result::failure("no matching Wi-Fi interface or connection for '" + target + "'");
+        }
+        if (last_err != ERROR_SUCCESS) {
+            return Result::failure(win::win32_error("WlanDisconnect", last_err));
+        }
+        mark_dirty();
         return Result::success();
     }
 
