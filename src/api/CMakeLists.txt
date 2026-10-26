@@ -1,7 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
 set(BROSYS_API_SOURCES
-    host_class.cpp
     api.cpp
     native_power.cpp
     native_audio.cpp
