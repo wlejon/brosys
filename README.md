@@ -5,7 +5,7 @@
 
 System-services substrate for a desktop environment: battery and power state, audio sinks and
 sources, network connectivity and Wi-Fi management, Bluetooth, desktop notifications, the
-system tray, processes, and the systemd journal. A standalone C++20 library with native platform backends for Linux, Windows,
+system tray, processes, the systemd journal, and disks (UDisks2). A standalone C++20 library with native platform backends for Linux, Windows,
 and macOS.
 
 brosys sits in the desktop-environment layer of the
@@ -56,6 +56,8 @@ include/brosys/
   processes.h       ProcessService: process snapshot, signals
   journal.h         JournalService: systemd journal queries (units, priority, boot, time, fields,
                     text), backward paging by cursor, live follow
+  disks.h           DiskService: drives and block devices, mount/unmount, eject, power off,
+                    SMART (NVMe and ATA), change events
   api.h             Bronze JavaScript binding entry point (brosys_api)
 ```
 
@@ -75,6 +77,7 @@ Operating system integrations are implemented directly against native platform f
 | **Notification History & DND** | Persistent history log with Do-Not-Disturb suppression across all platforms | Supported | Supported |
 | **System Tray** | StatusNotifierItem (SNI) host + `StatusNotifierWatcher`, `dbusmenu` data model | Shell mode: owns `Shell_TrayWnd` (`WM_COPYDATA NIM_*`); alongside Explorer: role `None` | Role `None` (menu extras cannot be hosted by third-party processes; clients use SDL3 tray) |
 | **Journal** | libsystemd `sd_journal` (the system's and the user's journal files; a fresh handle per query, a thread per follow) | Unavailable (`create` says why) | Unavailable (`create` says why) |
+| **Disks** | UDisks2 over D-Bus (`brodbus`): an ObjectManager mirror of drives and blocks (`Drive`, `Block`, `Partition`, `Filesystem`, `Loop`), `Mount`/`Unmount`, `Eject`/`PowerOff` (the drive's filesystems unmounted first), `NVMe.Controller` / `Drive.Ata` `SmartGetAttributes`; polkit may prompt (interactive authorization) | Unavailable (`create` says why) | Unavailable (`create` says why) |
 | **Processes** | `/proc/[pid]/stat`, `status`, `cmdline`; `kill` | Toolhelp32 + `GetProcessMemoryInfo` / `GetProcessTimes`; `WM_CLOSE` / `TerminateProcess` | `proc_listallpids` + `proc_pidinfo`; `kill` |
 | **Disk & Network Counters** | `/proc/diskstats` (physical disks per `/sys/block/*/device`), `/proc/net/dev` | `IOCTL_DISK_PERFORMANCE` per `\\.\PhysicalDriveN`, `GetIfTable2` | `IOBlockStorageDriver` statistics, `NET_RT_IFLIST2` + interface MIB |
 ## Building & Dependencies
@@ -150,6 +153,11 @@ active user session:
   WirePlumber and null sinks, verified using `wpctl` and `pactl`.
 - **Ayatana Indicators & Notifications:** `test_tray_ayatana` runs a real GTK application under
   `Xvfb`; `test_notify_server` validates against `notify-send` and `gdbus`.
+- **UDisks2:** `test_disks_fake` serves a scripted UDisks2 on a private system bus (drives,
+  partitions, mount/unmount/eject/power-off calls, SMART, change signals);
+  `test_disks_system` reads the real daemon against `/sys/class/block` and mountinfo and
+  reads SMART (read-only), and with `BROSYS_TEST_MUTATE=1` or as root mounts and unmounts a
+  loop device over a scratch ext4 image it creates and removes.
 - **Opt-in Wi-Fi Testing:** `test_network_wifi` is opt-in (`BRO_TEST_WIFI=1`, requires sudo)
   and runs against `mac80211_hwsim` with a virtual `hostapd` access point.
 

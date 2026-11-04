@@ -44,6 +44,9 @@ struct ServiceState {
 
     JournalService* journal = nullptr;
     bool ownJournal = false;
+
+    DiskService* disks = nullptr;
+    bool ownDisks = false;
 };
 
 ServiceState g_services;
@@ -241,6 +244,28 @@ void setJournalService(JournalService* service, bool own) {
     g_services.ownJournal = own;
 }
 
+DiskService* getDiskService(std::string* error) {
+    if (!g_services.disks) {
+        std::string err;
+        auto svc = DiskService::create(DiskConfig(), &err);
+        if (svc) {
+            g_services.disks = svc.release();
+            g_services.ownDisks = true;
+        } else if (error) {
+            *error = err;
+        }
+    }
+    return g_services.disks;
+}
+
+void setDiskService(DiskService* service, bool own) {
+    if (g_services.ownDisks && g_services.disks) {
+        delete g_services.disks;
+    }
+    g_services.disks = service;
+    g_services.ownDisks = own;
+}
+
 
 void installSys() {
     // Locate or create the `bro` namespace
@@ -293,6 +318,7 @@ void installSys() {
     installTray(sys);
     installProcesses(sys);
     installJournal(sys);
+    installDisks(sys);
 
     // Attach sys to bro
     broNs.set(ev::setProperty(broNs.get(), "sys", sys.get()));
@@ -315,6 +341,7 @@ void tickSysAsync() {
     if (g_services.network) tickNetwork();
     if (g_services.bluetooth) tickBluetooth();
     if (g_services.journal) tickJournal();
+    if (g_services.disks) tickDisks();
     tickNotifications();
     tickTray();
     drainAsyncJobs();
@@ -333,6 +360,7 @@ void shutdownSysAsync() {
     // Jobs first: their work runs against the services deleted below.
     joinAsyncJobs();
     if (g_services.journal) shutdownJournal();
+    if (g_services.disks) shutdownDisks();
 
     g_subscriptions.clear();
 
@@ -375,6 +403,11 @@ void shutdownSysAsync() {
         delete g_services.journal;
         g_services.journal = nullptr;
         g_services.ownJournal = false;
+    }
+    if (g_services.ownDisks && g_services.disks) {
+        delete g_services.disks;
+        g_services.disks = nullptr;
+        g_services.ownDisks = false;
     }
 }
 

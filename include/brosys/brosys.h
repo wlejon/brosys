@@ -7,6 +7,7 @@
 #include "brosys/audio.h"
 #include "brosys/bluetooth.h"
 #include "brosys/common.h"
+#include "brosys/disks.h"
 #include "brosys/event_queue.h"
 #include "brosys/journal.h"
 #include "brosys/network.h"

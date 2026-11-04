@@ -10,6 +10,7 @@ set(BROSYS_API_SOURCES
     native_tray.cpp
     native_processes.cpp
     native_journal.cpp
+    native_disks.cpp
     async_job.cpp
 )
 

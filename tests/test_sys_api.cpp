@@ -42,7 +42,7 @@ static void test_mounting() {
     CHECK(ev::isObject(sys.get()));
 
     const char* subNames[] = {
-        "power", "audio", "network", "bluetooth", "notifications", "tray", "processes", "journal"
+        "power", "audio", "network", "bluetooth", "notifications", "tray", "processes", "journal", "disks"
     };
     for (const char* name : subNames) {
         ev::Persistent sub(ev::getProperty(sys.get(), name));
@@ -451,6 +451,45 @@ static void test_io_counters_api() {
     brosys::api::setProcessService(nullptr, false);
 }
 
+static void test_disks_api() {
+    runScript("Disks API shapes and argument checks", R"JS(
+        const d = bro.sys.disks;
+        if (typeof d !== "object" || d === null) throw new Error("missing bro.sys.disks");
+        for (const f of ["getState", "getDrives", "getBlocks", "getDrive", "getBlock", "mount", "unmount",
+                         "eject", "powerOff", "smart", "on", "off"])
+            if (typeof d[f] !== "function") throw new Error("missing disks." + f);
+        const st = d.getState();
+        if (typeof st.available !== "boolean" || !Array.isArray(st.drives) || !Array.isArray(st.blocks))
+            throw new Error("getState shape");
+        for (const b of st.blocks) {
+            if (typeof b.device !== "string" || !Array.isArray(b.mountPoints)) throw new Error("block shape");
+            if (b.mounted !== (b.mountPoints.length > 0)) throw new Error("mounted");
+        }
+        if (d.getBlock("/dev/brosys-no-such-device") !== null) throw new Error("unknown block is null");
+        d.on("change", () => {});
+        globalThis.__disksDone = false;
+        const smartable = st.drives.find(x => x.smartSupported);
+        Promise.allSettled([
+            d.mount(""),
+            d.unmount("/dev/brosys-no-such-device"),
+            smartable ? d.smart(smartable.id) : Promise.resolve(null),
+        ]).then((r) => { globalThis.__disks = r; globalThis.__disksDone = true; });
+        return "SUCCESS";
+    )JS");
+    pumpUntil("__disksDone");
+    runScript("Disks API results", R"JS(
+        const [noArg, unknown, smart] = globalThis.__disks;
+        if (noArg.status !== "rejected" || !(noArg.reason instanceof Error)) throw new Error("mount('') rejects");
+        if (unknown.status !== "rejected") throw new Error("an unknown device rejects");
+        if (smart.status === "rejected") throw new Error("smart rejected: " + smart.reason.message);
+        if (smart.value) {
+            const s = smart.value;
+            if (typeof s.assessment !== "string" || !Array.isArray(s.attributes)) throw new Error("smart shape");
+        }
+        return "SUCCESS";
+    )JS");
+}
+
 int main() {
     std::cout << "Running brosys API unit tests..." << std::endl;
     const char* stress = std::getenv("BRONZE_GC_STRESS");
@@ -483,6 +522,7 @@ int main() {
         test_processes_api();
         test_journal_api();
         test_io_counters_api();
+        test_disks_api();
         test_events_and_async_tick();
         test_gc_stress();
 

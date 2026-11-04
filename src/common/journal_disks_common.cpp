@@ -1,6 +1,7 @@
-// The journal service's portable part, and its create() where there is no
-// backend (the systemd journal is Linux's): nullptr with a reason, never an
-// empty service that looks working.
+// The journal and disk services' portable parts, and their create() where
+// there is no backend (the systemd journal and UDisks2 are Linux's): nullptr
+// with a reason, never an empty service that looks working.
+#include "brosys/disks.h"
 #include "brosys/journal.h"
 
 #include <cctype>
@@ -24,6 +25,11 @@ int32_t parse_journal_priority(const std::string& name) {
 
 std::unique_ptr<JournalService> JournalService::create(const JournalConfig&, std::string* error) {
     if (error) *error = "the systemd journal exists only on Linux";
+    return nullptr;
+}
+
+std::unique_ptr<DiskService> DiskService::create(const DiskConfig&, std::string* error) {
+    if (error) *error = "disk management (UDisks2) is implemented only on Linux";
     return nullptr;
 }
 

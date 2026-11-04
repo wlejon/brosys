@@ -9,6 +9,8 @@
 #   test_audio_private    a private PipeWire + WirePlumber with null sinks / sources (mutations)
 #   test_audio_session    the user's PipeWire session, read-only (compared with pw-dump / wpctl)
 #   test_journal          the real journal: records it writes itself, read back, paged and followed
+#   test_disks_fake       a scripted UDisks2 on a private bus (snapshot, mount/eject/power off, SMART, events)
+#   test_disks_system     the real UDisks2, read-only (vs /sys and mountinfo); mutating: a loop-device mount
 
 add_library(brosys_system_fakes STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/linux/fakes/fake_logind.cpp
@@ -40,6 +42,8 @@ if(BROSYS_WITH_PIPEWIRE)
 endif()
 
 brosys_test(test_journal SOURCES linux/test_journal.cpp LIBS PkgConfig::BROSYS_SDBUS)
+brosys_test(test_disks_fake SOURCES linux/test_disks_fake.cpp linux/fakes/fake_udisks.cpp LIBS ${_sys_libs})
+brosys_test(test_disks_system SOURCES linux/test_disks_system.cpp LIBS ${_sys_libs})
 
 brosys_test(test_system_models SOURCES linux/test_system_models.cpp LIBS ${_sys_libs})
 if(BROSYS_WITH_PIPEWIRE)
