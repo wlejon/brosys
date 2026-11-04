@@ -4,8 +4,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 System-services substrate for a desktop environment: battery and power state, audio sinks and
-sources, network connectivity and Wi-Fi management, Bluetooth, desktop notifications, and the
-system tray. A standalone C++20 library with native platform backends for Linux, Windows,
+sources, network connectivity and Wi-Fi management, Bluetooth, desktop notifications, the
+system tray, processes, and the systemd journal. A standalone C++20 library with native platform backends for Linux, Windows,
 and macOS.
 
 brosys sits in the desktop-environment layer of the
@@ -53,6 +53,9 @@ include/brosys/
   bluetooth.h       BluetoothService: adapters, devices, power, discovery, pairing/connect
   notifications.h   NotificationServer: notification daemon, actions, history, Do-Not-Disturb
   tray.h            TrayHost: status-notifier items, context menus, interaction
+  processes.h       ProcessService: process snapshot, signals
+  journal.h         JournalService: systemd journal queries (units, priority, boot, time, fields,
+                    text), backward paging by cursor, live follow
   api.h             Bronze JavaScript binding entry point (brosys_api)
 ```
 
@@ -71,6 +74,7 @@ Operating system integrations are implemented directly against native platform f
 | **Notifications** | FreeDesktop `org.freedesktop.Notifications` v1.2 server with actions, hints, and replace | Shell mode: tray balloons (`NIF_INFO`); alongside Explorer: local notifications | Local notification delivery (does not duplicate UNUserNotificationCenter toasts) |
 | **Notification History & DND** | Persistent history log with Do-Not-Disturb suppression across all platforms | Supported | Supported |
 | **System Tray** | StatusNotifierItem (SNI) host + `StatusNotifierWatcher`, `dbusmenu` data model | Shell mode: owns `Shell_TrayWnd` (`WM_COPYDATA NIM_*`); alongside Explorer: role `None` | Role `None` (menu extras cannot be hosted by third-party processes; clients use SDL3 tray) |
+| **Journal** | libsystemd `sd_journal` (the system's and the user's journal files; a fresh handle per query, a thread per follow) | Unavailable (`create` says why) | Unavailable (`create` says why) |
 
 ## Building & Dependencies
 

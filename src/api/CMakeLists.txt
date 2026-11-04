@@ -9,6 +9,8 @@ set(BROSYS_API_SOURCES
     native_notifications.cpp
     native_tray.cpp
     native_processes.cpp
+    native_journal.cpp
+    async_job.cpp
 )
 
 add_library(brosys_api STATIC

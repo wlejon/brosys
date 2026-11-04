@@ -8,6 +8,7 @@
 #include "brosys/bluetooth.h"
 #include "brosys/common.h"
 #include "brosys/event_queue.h"
+#include "brosys/journal.h"
 #include "brosys/network.h"
 #include "brosys/notifications.h"
 #include "brosys/power.h"

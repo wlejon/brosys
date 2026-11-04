@@ -1,5 +1,6 @@
 #include "api.h"
 #include "arg_reader.h"
+#include "async_job.h"
 #include "object_builder.h"
 
 #include <algorithm>
@@ -40,6 +41,9 @@ struct ServiceState {
 
     ProcessService* processes = nullptr;
     bool ownProcesses = false;
+
+    JournalService* journal = nullptr;
+    bool ownJournal = false;
 };
 
 ServiceState g_services;
@@ -215,6 +219,29 @@ void setProcessService(ProcessService* service, bool own) {
     g_services.ownProcesses = own;
 }
 
+JournalService* getJournalService(std::string* error) {
+    if (!g_services.journal) {
+        std::string err;
+        auto svc = JournalService::create(JournalConfig(), &err);
+        if (svc) {
+            g_services.journal = svc.release();
+            g_services.ownJournal = true;
+        } else if (error) {
+            *error = err;
+        }
+    }
+    return g_services.journal;
+}
+
+void setJournalService(JournalService* service, bool own) {
+    if (g_services.ownJournal && g_services.journal) {
+        delete g_services.journal;
+    }
+    g_services.journal = service;
+    g_services.ownJournal = own;
+}
+
+
 void installSys() {
     // Locate or create the `bro` namespace
     ev::GlobalValue g = ev::globalValue("bro");
@@ -265,6 +292,7 @@ void installSys() {
     installNotifications(sys);
     installTray(sys);
     installProcesses(sys);
+    installJournal(sys);
 
     // Attach sys to bro
     broNs.set(ev::setProperty(broNs.get(), "sys", sys.get()));
@@ -286,8 +314,10 @@ void tickSysAsync() {
     if (g_services.audio) tickAudio();
     if (g_services.network) tickNetwork();
     if (g_services.bluetooth) tickBluetooth();
+    if (g_services.journal) tickJournal();
     tickNotifications();
     tickTray();
+    drainAsyncJobs();
 
     ev::drainMicrotasks();
 }
@@ -300,6 +330,9 @@ void shutdownSysAsync() {
     shutdownNotifications();
     shutdownTray();
     shutdownProcesses();
+    // Jobs first: their work runs against the services deleted below.
+    joinAsyncJobs();
+    if (g_services.journal) shutdownJournal();
 
     g_subscriptions.clear();
 
@@ -337,6 +370,11 @@ void shutdownSysAsync() {
         delete g_services.processes;
         g_services.processes = nullptr;
         g_services.ownProcesses = false;
+    }
+    if (g_services.ownJournal && g_services.journal) {
+        delete g_services.journal;
+        g_services.journal = nullptr;
+        g_services.ownJournal = false;
     }
 }
 

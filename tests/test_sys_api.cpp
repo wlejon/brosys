@@ -2,9 +2,11 @@
 #include "embed/embed.h"
 #include "eval/eval.h"
 
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <thread>
 
 namespace ev = bronze::embed;
 using Value = bronze::Value;
@@ -38,7 +40,7 @@ static void test_mounting() {
     CHECK(ev::isObject(sys.get()));
 
     const char* subNames[] = {
-        "power", "audio", "network", "bluetooth", "notifications", "tray", "processes"
+        "power", "audio", "network", "bluetooth", "notifications", "tray", "processes", "journal"
     };
     for (const char* name : subNames) {
         ev::Persistent sub(ev::getProperty(sys.get(), name));
@@ -334,6 +336,68 @@ static void test_processes_api() {
     )JS");
 }
 
+// Ticks until `globalThis[flag]` is set (a promise chain settled) or ~10 s pass.
+static void pumpUntil(const char* flag) {
+    const std::string probe = std::string("globalThis.") + flag + " ? 'yes' : 'no'";
+    for (int i = 0; i < 1000; ++i) {
+        brosys::api::tickSysAsync();
+        ev::CallResult r = bronze::eval::evalScript(probe);
+        if (!r.thrown && ev::isString(r.value) && ev::toUtf8(r.value) == "yes") return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    std::cerr << "timed out waiting for " << flag << std::endl;
+    std::exit(1);
+}
+
+static void test_journal_api() {
+    runScript("Journal API shapes and argument checks", R"JS(
+        const j = bro.sys.journal;
+        if (typeof j !== "object" || j === null) throw new Error("missing bro.sys.journal");
+        for (const f of ["query", "boots", "values", "follow"])
+            if (typeof j[f] !== "function") throw new Error("missing journal." + f);
+        if (j.priorities.length !== 8 || j.priorities[3] !== "err") throw new Error("priorities");
+        let threw = false;
+        try { j.follow({}); } catch (e) { threw = true; }
+        if (!threw) throw new Error("follow without a callback must throw");
+
+        globalThis.__journal = null;
+        globalThis.__journalDone = false;
+        const note = (k, v) => { globalThis.__journal = globalThis.__journal || {}; globalThis.__journal[k] = v; };
+        Promise.allSettled([
+            j.query({ limit: 5, priority: "info" }),
+            j.query({ priority: "loud" }),
+            j.boots(),
+            j.values("_TRANSPORT"),
+        ]).then((r) => {
+            note("results", r);
+            globalThis.__journalDone = true;
+        });
+        return "SUCCESS";
+    )JS");
+    pumpUntil("__journalDone");
+    runScript("Journal API results", R"JS(
+        const [page, badPrio, boots, values] = globalThis.__journal.results;
+        if (badPrio.status !== "rejected" || !(badPrio.reason instanceof Error)) throw new Error("bad priority must reject");
+        if (page.status === "rejected") {
+            // No readable journal here: every call says why.
+            if (!String(page.reason.message || page.reason)) throw new Error("rejection without a reason");
+            return "SUCCESS";
+        }
+        const p = page.value;
+        if (!Array.isArray(p.entries) || p.entries.length > 5) throw new Error("entries");
+        if (typeof p.more !== "boolean") throw new Error("more");
+        for (const e of p.entries) {
+            if (typeof e.cursor !== "string" || !e.cursor) throw new Error("cursor");
+            if (typeof e.time !== "number" || e.time <= 0) throw new Error("time");
+            if (typeof e.message !== "string") throw new Error("message");
+            if (e.priority !== null && (e.priority < 0 || e.priority > 6)) throw new Error("priority filter: " + e.priority);
+        }
+        if (boots.status !== "fulfilled" || !Array.isArray(boots.value)) throw new Error("boots");
+        if (values.status !== "fulfilled" || !Array.isArray(values.value)) throw new Error("values");
+        return "SUCCESS";
+    )JS");
+}
+
 int main() {
     std::cout << "Running brosys API unit tests..." << std::endl;
     const char* stress = std::getenv("BRONZE_GC_STRESS");
@@ -364,6 +428,7 @@ int main() {
         test_notifications_api();
         test_tray_api();
         test_processes_api();
+        test_journal_api();
         test_events_and_async_tick();
         test_gc_stress();
 

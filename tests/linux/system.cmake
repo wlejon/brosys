@@ -8,6 +8,7 @@
 #   test_network_wifi     opt-in: a real scan on a mac80211_hwsim radio (see the test's header)
 #   test_audio_private    a private PipeWire + WirePlumber with null sinks / sources (mutations)
 #   test_audio_session    the user's PipeWire session, read-only (compared with pw-dump / wpctl)
+#   test_journal          the real journal: records it writes itself, read back, paged and followed
 
 add_library(brosys_system_fakes STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/linux/fakes/fake_logind.cpp
@@ -37,6 +38,8 @@ if(BROSYS_WITH_PIPEWIRE)
     brosys_test(test_audio_private SOURCES linux/test_audio_private.cpp linux/fakes/private_pipewire.cpp
                 LIBS ${_sys_libs} TIMEOUT 180)
 endif()
+
+brosys_test(test_journal SOURCES linux/test_journal.cpp LIBS PkgConfig::BROSYS_SDBUS)
 
 brosys_test(test_system_models SOURCES linux/test_system_models.cpp LIBS ${_sys_libs})
 if(BROSYS_WITH_PIPEWIRE)

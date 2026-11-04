@@ -16,7 +16,8 @@ using Value = bronze::Value;
 
 /// Mount the `bro.sys` APIs into the current Bronze realm:
 /// `bro.sys.power`, `bro.sys.audio`, `bro.sys.network`,
-/// `bro.sys.bluetooth`, `bro.sys.notifications`, `bro.sys.tray`.
+/// `bro.sys.bluetooth`, `bro.sys.notifications`, `bro.sys.tray`,
+/// `bro.sys.processes`, `bro.sys.journal`.
 void installSys();
 
 /// Drain pending events from all active services and dispatch callbacks / resolve promises.
@@ -48,6 +49,10 @@ void setTrayHost(TrayHost* host, bool own = false);
 ProcessService* getProcessService();
 void setProcessService(ProcessService* service, bool own = false);
 
+// Created on first use; *error says why when there is none.
+JournalService* getJournalService(std::string* error = nullptr);
+void setJournalService(JournalService* service, bool own = false);
+
 // Event registration & dispatch
 void addEventListener(std::string_view target, std::string_view event, Value callback);
 void removeEventListener(std::string_view target, std::string_view event, Value callback);
@@ -61,6 +66,7 @@ void installBluetooth(ObjectBuilder& sys);
 void installNotifications(ObjectBuilder& sys);
 void installTray(ObjectBuilder& sys);
 void installProcesses(ObjectBuilder& sys);
+void installJournal(ObjectBuilder& sys);
 
 // Subsystem tick & shutdown
 void tickPower();
@@ -77,6 +83,8 @@ void shutdownBluetooth();
 void shutdownNotifications();
 void shutdownTray();
 void shutdownProcesses();
+void tickJournal();
+void shutdownJournal();
 
 } // namespace brosys::api
 
