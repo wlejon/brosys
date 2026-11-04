@@ -75,6 +75,45 @@ Value doKillProcess(Value, std::span<const Value> args) {
     return ev::fromBool(true);
 }
 
+// bro.sys.processes.ioCounters(): the machine's cumulative disk and network
+// counters, with the monotonic time they were read at.
+Value doIoCounters(Value, std::span<const Value>) {
+    ProcessService* svc = getProcessService();
+    const IoCounters c = svc ? svc->io_counters() : read_io_counters();
+    ArrayBuilder disks(c.disks.size());
+    for (size_t i = 0; i < c.disks.size(); ++i) {
+        const DiskCounters& d = c.disks[i];
+        ObjectBuilder b;
+        b.set("name", d.name);
+        b.set("readBytes", static_cast<double>(d.read_bytes));
+        b.set("writeBytes", static_cast<double>(d.write_bytes));
+        b.set("reads", static_cast<double>(d.reads));
+        b.set("writes", static_cast<double>(d.writes));
+        ev::Persistent item(b.build());
+        disks.set(static_cast<uint32_t>(i), item.get());
+    }
+    ev::Persistent disksValue(disks.build());
+    ArrayBuilder ifaces(c.interfaces.size());
+    for (size_t i = 0; i < c.interfaces.size(); ++i) {
+        const NetCounters& n = c.interfaces[i];
+        ObjectBuilder b;
+        b.set("name", n.name);
+        b.set("loopback", n.loopback);
+        b.set("rxBytes", static_cast<double>(n.rx_bytes));
+        b.set("txBytes", static_cast<double>(n.tx_bytes));
+        b.set("rxPackets", static_cast<double>(n.rx_packets));
+        b.set("txPackets", static_cast<double>(n.tx_packets));
+        ev::Persistent item(b.build());
+        ifaces.set(static_cast<uint32_t>(i), item.get());
+    }
+    ev::Persistent ifacesValue(ifaces.build());
+    ObjectBuilder out;
+    out.set("timestamp", c.timestamp_ms);
+    out.set("disks", disksValue.get());
+    out.set("interfaces", ifacesValue.get());
+    return out.build();
+}
+
 }  // namespace
 
 void installProcesses(ObjectBuilder& sys) {
@@ -84,6 +123,7 @@ void installProcesses(ObjectBuilder& sys) {
     ObjectBuilder procs;
     procs.def("list", 0, doListProcesses);
     procs.def("kill", 2, doKillProcess);
+    procs.def("ioCounters", 0, doIoCounters);
     sys.set("processes", procs.build());
 }
 

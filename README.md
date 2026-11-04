@@ -75,7 +75,8 @@ Operating system integrations are implemented directly against native platform f
 | **Notification History & DND** | Persistent history log with Do-Not-Disturb suppression across all platforms | Supported | Supported |
 | **System Tray** | StatusNotifierItem (SNI) host + `StatusNotifierWatcher`, `dbusmenu` data model | Shell mode: owns `Shell_TrayWnd` (`WM_COPYDATA NIM_*`); alongside Explorer: role `None` | Role `None` (menu extras cannot be hosted by third-party processes; clients use SDL3 tray) |
 | **Journal** | libsystemd `sd_journal` (the system's and the user's journal files; a fresh handle per query, a thread per follow) | Unavailable (`create` says why) | Unavailable (`create` says why) |
-
+| **Processes** | `/proc/[pid]/stat`, `status`, `cmdline`; `kill` | Toolhelp32 + `GetProcessMemoryInfo` / `GetProcessTimes`; `WM_CLOSE` / `TerminateProcess` | `proc_listallpids` + `proc_pidinfo`; `kill` |
+| **Disk & Network Counters** | `/proc/diskstats` (physical disks per `/sys/block/*/device`), `/proc/net/dev` | `IOCTL_DISK_PERFORMANCE` per `\\.\PhysicalDriveN`, `GetIfTable2` | `IOBlockStorageDriver` statistics, `NET_RT_IFLIST2` + interface MIB |
 ## Building & Dependencies
 
 brosys requires CMake 3.24+ and a C++20 compiler.

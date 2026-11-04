@@ -18,6 +18,7 @@ endfunction()
 
 brosys_test(test_event_queue SOURCES common/test_event_queue.cpp)
 brosys_test(test_processes SOURCES common/test_processes.cpp)
+brosys_test(test_io_counters SOURCES common/test_io_counters.cpp)
 if(WIN32 OR APPLE)
     brosys_test(test_linux_only_services SOURCES common/test_linux_only_services.cpp)
 endif()

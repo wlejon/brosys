@@ -241,4 +241,8 @@ Result ProcessService::kill(int32_t pid, int32_t signal) {
     return kill_process(pid, signal);
 }
 
+IoCounters ProcessService::io_counters() const {
+    return read_io_counters();
+}
+
 }  // namespace brosys

@@ -9,6 +9,7 @@
 #pragma once
 
 #include "brosys/common.h"
+#include "brosys/io_counters.h"
 
 #include <cstdint>
 #include <memory>
@@ -62,6 +63,9 @@ public:
 
     virtual std::vector<ProcessInfo> list() const;
     virtual Result kill(int32_t pid, int32_t signal = signal_num::SIGTERM_NUM);
+    // The machine's disk and network counters (io_counters.h): what an
+    // activity monitor shows beside the process table.
+    virtual IoCounters io_counters() const;
 };
 
 }  // namespace brosys

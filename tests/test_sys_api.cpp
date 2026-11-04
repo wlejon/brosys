@@ -1,4 +1,6 @@
 #include "brosys/api.h"
+#include "brosys/processes.h"
+#include "api.h"
 #include "embed/embed.h"
 #include "eval/eval.h"
 
@@ -398,6 +400,57 @@ static void test_journal_api() {
     )JS");
 }
 
+// ioCounters' shape over the machine's real counters, then its values through
+// a ProcessService that answers fixed ones.
+class FixedIoService : public brosys::ProcessService {
+public:
+    brosys::IoCounters io_counters() const override {
+        brosys::IoCounters c;
+        c.timestamp_ms = 1234.5;
+        c.disks.push_back({"disk-a", 6000000000ull, 2048, 7, 3});
+        c.interfaces.push_back({"lo", true, 10, 20, 1, 2});
+        c.interfaces.push_back({"eth9", false, 5000000000ull, 4000, 50, 40});
+        return c;
+    }
+};
+
+static void test_io_counters_api() {
+    runScript("Processes API ioCounters on this machine", R"JS(
+        if (typeof bro.sys.processes.ioCounters !== "function") throw new Error("missing bro.sys.processes.ioCounters");
+        const a = bro.sys.processes.ioCounters();
+        if (typeof a.timestamp !== "number" || !(a.timestamp > 0)) throw new Error("invalid timestamp");
+        if (!Array.isArray(a.disks) || !Array.isArray(a.interfaces)) throw new Error("disks / interfaces not arrays");
+        for (const d of a.disks)
+            for (const k of ["readBytes", "writeBytes", "reads", "writes"])
+                if (typeof d[k] !== "number" || d[k] < 0 || typeof d.name !== "string") throw new Error("bad disk " + k);
+        for (const n of a.interfaces) {
+            for (const k of ["rxBytes", "txBytes", "rxPackets", "txPackets"])
+                if (typeof n[k] !== "number" || n[k] < 0) throw new Error("bad interface " + k);
+            if (typeof n.name !== "string" || typeof n.loopback !== "boolean") throw new Error("bad interface name");
+        }
+        const b = bro.sys.processes.ioCounters();
+        if (!(b.timestamp >= a.timestamp)) throw new Error("timestamp went back");
+        return "SUCCESS";
+    )JS");
+
+    FixedIoService fixed;
+    brosys::api::setProcessService(&fixed, false);
+    runScript("Processes API ioCounters values", R"JS(
+        const c = bro.sys.processes.ioCounters();
+        if (c.timestamp !== 1234.5) throw new Error("timestamp " + c.timestamp);
+        if (c.disks.length !== 1 || c.interfaces.length !== 2) throw new Error("counts");
+        const d = c.disks[0];
+        if (d.name !== "disk-a" || d.readBytes !== 6000000000 || d.writeBytes !== 2048 || d.reads !== 7 || d.writes !== 3)
+            throw new Error("disk " + JSON.stringify(d));
+        const [lo, eth] = c.interfaces;
+        if (lo.name !== "lo" || lo.loopback !== true || lo.rxBytes !== 10 || lo.txBytes !== 20) throw new Error("lo");
+        if (eth.name !== "eth9" || eth.loopback !== false || eth.rxBytes !== 5000000000 || eth.txBytes !== 4000 ||
+            eth.rxPackets !== 50 || eth.txPackets !== 40) throw new Error("eth " + JSON.stringify(eth));
+        return "SUCCESS";
+    )JS");
+    brosys::api::setProcessService(nullptr, false);
+}
+
 int main() {
     std::cout << "Running brosys API unit tests..." << std::endl;
     const char* stress = std::getenv("BRONZE_GC_STRESS");
@@ -429,6 +482,7 @@ int main() {
         test_tray_api();
         test_processes_api();
         test_journal_api();
+        test_io_counters_api();
         test_events_and_async_tick();
         test_gc_stress();
 
