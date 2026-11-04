@@ -243,6 +243,19 @@ void test_follow(JournalService& j) {
     j.unfollow(b);
     j.unfollow(b);  // twice is harmless
 
+    // From the end, matching nothing written yet: the first matching record
+    // still arrives (a filtered tail with no record must not strand the reader).
+    JournalQuery fresh;
+    fresh.matches.emplace_back("BROSYS_TEST", g_tag + "-fresh");
+    const uint64_t c = j.follow(fresh, &err);
+    REQUIRE(c != 0);
+    std::this_thread::sleep_for(300ms);
+    sd_journal_send("MESSAGE=brosys journal test fresh", "BROSYS_TEST=%s-fresh", g_tag.c_str(), nullptr);
+    auto freshGot = collect(j, c, 1);
+    REQUIRE(freshGot.size() == 1);
+    CHECK_EQ(freshGot[0].message, std::string("brosys journal test fresh"));
+    j.unfollow(c);
+
     JournalQuery bogus = tagged();
     bogus.matches.emplace_back("bad name", "x");
     CHECK_EQ(j.follow(bogus, &err), uint64_t(0));

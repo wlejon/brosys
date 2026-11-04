@@ -392,23 +392,31 @@ public:
             if (error) *error = errno_text("sd_journal_open", r);
             return 0;
         }
+        sd_journal* j = f->journal.get();
+        // A follow from the end starts after the newest record of the whole
+        // journal, read before the matches apply: seeking the tail of a
+        // filtered view that has no record yet leaves the reader at the
+        // "tail" location, after which no later record ever arrives.
+        std::string after = q.after;
+        int r = 0;
+        if (after.empty()) {
+            r = sd_journal_seek_tail(j);
+            if (r >= 0 && sd_journal_previous(j) > 0) after = f->journal.cursor();
+        }
         if (std::string why = apply_matches(f->journal, q); !why.empty()) {
             if (error) *error = why;
             return 0;
         }
-        sd_journal* j = f->journal.get();
         // Position just before the first record to deliver.
-        int r;
-        if (!q.after.empty()) {
-            r = sd_journal_seek_cursor(j, q.after.c_str());
-            if (r >= 0 && sd_journal_next(j) > 0 && sd_journal_test_cursor(j, q.after.c_str()) <= 0) {
+        if (r >= 0 && !after.empty()) {
+            r = sd_journal_seek_cursor(j, after.c_str());
+            if (r >= 0 && sd_journal_next(j) > 0 && sd_journal_test_cursor(j, after.c_str()) <= 0) {
                 // The cursor's record is gone (or filtered out): we stand on
                 // the first one after it, which is due too.
                 sd_journal_previous(j);
             }
-        } else {
-            r = sd_journal_seek_tail(j);
-            if (r >= 0) sd_journal_previous(j);
+        } else if (r >= 0) {
+            r = sd_journal_seek_head(j);  // an empty journal: from its first record
         }
         if (r < 0) {
             if (error) *error = errno_text("sd_journal_seek", r);
